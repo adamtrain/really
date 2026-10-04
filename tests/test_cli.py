@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 from really import cli
 from really.clipboard import ClipboardError
 from really.store import ENV_DB, State, Store
+from really.summarize import SummaryError
 
 from .conftest import (
     BLOG,
@@ -57,6 +58,19 @@ def clipboard(monkeypatch):
     contents = {"text": POST}
     monkeypatch.setattr(cli, "read_clipboard", lambda: contents["text"])
     return contents
+
+
+@pytest.fixture
+def claude(monkeypatch):
+    """Stands in for asking Claude: remembers what it was asked, and answers with a summary."""
+    asked: list[dict] = []
+
+    def answer(**article) -> str:
+        asked.append(article)
+        return f"**{article['title']}** in short.\n\n- Point {len(asked)}."
+
+    monkeypatch.setattr(cli, "summarize", answer)
+    return asked
 
 
 @pytest.fixture
@@ -328,7 +342,7 @@ def test_next_opens_the_oldest_and_remembers(home, browser):
     output = ok("next")
     assert browser == [BLOG]
     assert "Tidy Queues, Tidy Mind" in output
-    assert "really archive" in output
+    assert "really done" in output
     assert items(home)[0].opened_at is not None
     assert "▸" in ok()
 
@@ -365,6 +379,63 @@ def test_next_with_an_empty_queue(browser):
     assert browser == []
 
 
+def test_info_shows_what_is_known_about_one_item(browser):
+    ok("add", BLOG)
+    ok("add", POST, "-t", "reading")
+    output = ok("info", "2")
+    for detail in (
+        "#2",
+        "The Slow Web Is Still Here",
+        "Ada Quill · Margin Notes · 1 min · published 2026-03-14",
+        "Notes on reading things properly.",
+        "#reading",
+        POST,
+        "Saved copy",
+        "242 words",
+        "Added",
+    ):
+        assert detail in output
+    assert "lighthouse" not in output  # the details, not the article
+    assert "Opened" not in output and "Archived" not in output
+    assert browser == []
+
+
+def test_info_follows_an_item_into_the_archive(browser):
+    ok("add", BLOG)
+    ok("next")
+    ok("archive", "--note", "The weekly pass")
+    output = ok("info", "a")
+    assert "#a" in output and "Tidy Queues, Tidy Mind" in output
+    assert "The weekly pass" in output
+    assert "Opened" in output and "Archived" in output
+    assert output == ok("info", "tidy queues")  # words from the title find it too
+
+
+def test_info_says_when_there_is_no_saved_copy():
+    ok("add", "--offline", BLOG)
+    output = " ".join(ok("info", "1").split())
+    assert "Saved copy none" in output
+    assert "really refresh 1 fetches one" in output
+
+
+def test_info_says_when_the_copy_is_only_a_preview():
+    ok("add", PAYWALLED)
+    assert "168 words, the free preview only" in ok("info", "1")
+
+
+def test_info_json_has_the_details_without_the_text():
+    ok("add", POST)
+    data = json.loads(ok("info", "1", "--json"))
+    assert (data["ref"], data["title"], data["words"]) == ("1", "The Slow Web Is Still Here", 242)
+    assert "content" not in data
+
+
+def test_info_on_something_that_is_not_there():
+    result = run("info", "4")
+    assert result.exit_code == 1
+    assert "There's no #4 in your queue." in result.output
+
+
 def test_open_by_words(browser):
     ok("add", BLOG, POST)
     ok("open", "slow web")
@@ -399,6 +470,47 @@ def test_archive_what_was_just_read(home, browser):
     [kept] = items(home, State.ARCHIVED)
     assert (kept.note, kept.tags) == ("The weekly pass", ("habits",))
     assert [item.id for item in items(home, State.QUEUED)] == [2]
+
+
+def test_done_archives_what_you_last_opened(home, browser):
+    ok("add", BLOG, POST, PAYWALLED)
+    ok("open", "2")
+    output = ok("done")
+    assert "Archived #2 → #a The Slow Web Is Still Here" in output
+    assert "Queue renumbered: #3 is now #2." in output
+    assert [item.title for item in items(home, State.ARCHIVED)] == ["The Slow Web Is Still Here"]
+
+
+def test_done_takes_a_note_and_tags_like_archive(home, browser):
+    ok("add", BLOG)
+    ok("next")
+    assert "#habits" in ok("done", "--note", "The weekly pass", "-t", "habits")
+    [kept] = items(home, State.ARCHIVED)
+    assert (kept.note, kept.tags) == ("The weekly pass", ("habits",))
+
+
+def test_done_times_the_read(home, browser, clock):
+    ok("add", LONGREAD)
+    ok("next")
+    clock.advance(minutes=8)
+    assert "Read in 8 min" in ok("done")
+
+
+def test_done_with_nothing_opened(home, browser):
+    ok("add", BLOG)
+    result = run("done")
+    assert result.exit_code == 1
+    assert "nothing you've opened" in result.output
+    assert "really archive 3" in " ".join(result.output.split())  # how to archive something else
+    assert items(home, State.ARCHIVED) == []
+
+
+def test_done_is_only_for_what_you_opened(home, browser):
+    ok("add", BLOG)
+    assert run("done", "1").exit_code == 2  # naming something is what archive is for
+    ok("next")
+    ok("done")
+    assert run("done").exit_code == 1  # and once it's archived, there's nothing left open
 
 
 def test_archive_with_nothing_opened_asks_which():
@@ -478,6 +590,93 @@ def test_requeue(home):
     assert "Requeued #a → #1 Tidy Queues, Tidy Mind" in ok("requeue", "tidy")
     assert items(home)[0].state is State.QUEUED
     assert run("requeue", "1").exit_code == 1
+
+
+# ── Summaries ─────────────────────────────────────────────────────────────────
+
+
+def test_tldr_summarizes_the_saved_text(claude):
+    ok("add", POST)
+    output = ok("tldr", "1")
+    assert output == "**The Slow Web Is Still Here** in short.\n\n- Point 1.\n"  # piped: just that
+    [asked] = claude
+    assert (asked["title"], asked["author"], asked["site"]) == (
+        "The Slow Web Is Still Here",
+        "Ada Quill",
+        "Margin Notes",
+    )
+    assert asked["text"].startswith("Every few months somebody announces")
+    assert "https://example.org" not in asked["text"]  # the plain text, not the Markdown
+
+
+def test_tldr_is_only_asked_for_once(home, claude):
+    ok("add", POST)
+    first = ok("tldr", "1")
+    assert ok("tldr", "1") == first
+    ok("archive", "1")
+    assert ok("tldr", "a") == ok("tldr", "slow web") == first
+    assert len(claude) == 1
+    with Store(home) as store:
+        assert store.tldr(1) == first.strip()
+
+
+def test_tldr_is_asked_for_again_once_the_text_has_changed(claude, clipboard):
+    ok("add", POST)
+    ok("tldr", "1")
+    clipboard["text"] = "A rewritten article, pasted in by hand, and not the same at all. " * 5
+    ok("paste", "1")
+    assert "Point 2." in ok("tldr", "1")
+    assert claude[1]["text"].startswith("A rewritten article")
+
+
+def test_tldr_fails_without_a_saved_copy(claude):
+    ok("add", "--offline", BLOG)
+    result = run("tldr", "1")
+    assert result.exit_code == 1
+    assert "There's no saved copy of #1 to summarize." in result.output
+    assert "really refresh 1" in result.output
+    assert claude == []
+
+
+def test_tldr_fails_when_only_a_preview_is_saved(claude):
+    ok("add", PAYWALLED)
+    result = run("tldr", "1")
+    assert result.exit_code == 1
+    assert "Only the free preview of #1 is saved, not the full text." in result.output
+    assert "really paste 1" in " ".join(result.output.split())
+    assert claude == []
+
+
+def test_tldr_when_claude_cannot_help(home, monkeypatch):
+    def refuse(**article):
+        raise SummaryError("Claude couldn't summarize it.", detail="Please run /login", hint="Try.")
+
+    monkeypatch.setattr(cli, "summarize", refuse)
+    ok("add", POST)
+    result = run("tldr", "1")
+    assert result.exit_code == 1
+    assert "Claude couldn't summarize it." in result.output
+    assert "Please run /login" in result.output
+    with Store(home) as store:
+        assert store.tldr(1) == ""  # nothing is saved, so it will be asked again
+
+
+def test_a_summary_shows_up_nowhere_else(claude):
+    ok("add", POST)
+    ok("tldr", "1")
+    for elsewhere in (
+        ok(),
+        ok("info", "1"),
+        ok("info", "1", "--json"),
+        ok("show", "1"),
+        ok("show", "1", "--json"),
+        ok("list", "--json"),
+        ok("export", "--json"),
+        ok("search", "short"),
+        ok("stats"),
+    ):
+        assert "in short" not in elsewhere
+        assert "Point 1" not in elsewhere
 
 
 # ── What things are called ────────────────────────────────────────────────────

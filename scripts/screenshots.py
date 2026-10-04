@@ -76,7 +76,7 @@ def command(console: Console, line: str) -> None:
 
 
 def archive(console: Console, store: Store, item: Item, reading: Reading | None = None) -> None:
-    """What `really archive` prints: what the item was and is now called, and who else moved."""
+    """What archiving prints: what the item was and is now called, and who else moved."""
     was = item.ref
     before = {other.id: other.number for other in store.items(State.QUEUED)}
     item = store.archive(item.id)
@@ -164,7 +164,7 @@ def search(store: Store) -> Console:
     console = terminal(92)
     item = store.resolve("slow web")
     store.mark_opened(item.id)
-    command(console, 'really archive --note "The lighthouse problem" --tag reading')
+    command(console, 'really done --note "The lighthouse problem" --tag reading')
     store.edit(item.id, note="The lighthouse problem")
     archive(console, store, store.set_tags(item.id, ["reading"]))
     console.print()
@@ -187,7 +187,7 @@ def pace(store: Store) -> Console:
     item = store.resolve("attention spans")
     reading = Reading(item.words, 29 * 60, NOW)
     store.record(reading)
-    command(console, "really archive")
+    command(console, "really done")
     archive(console, store, item, reading)
     console.print()
     command(console, "really pace")

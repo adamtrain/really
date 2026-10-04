@@ -1,4 +1,5 @@
 import io
+import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -248,3 +249,32 @@ def test_nothing_is_said_when_nothing_moved():
     out = console()
     render.renumbered(out, State.QUEUED, [])
     assert printed(out) == ""
+
+
+def test_details_give_dates_as_well_as_ages(item):
+    out = console()
+    seen = replace(
+        item,
+        added_at=NOW - timedelta(days=40),
+        opened_at=NOW - timedelta(days=2),
+        fetched_at=NOW - timedelta(days=40),
+    )
+    render.details(out, seen, now=NOW)
+    rows = {
+        line.split()[0]: " ".join(line.split()[1:]) for line in printed(out).splitlines()[-5:-1]
+    }
+    assert rows["Saved"] == "copy 1,150 words · fetched 5w ago"
+    # The date is shown as the reader's own clock had it, so only its shape is checked here.
+    dated = r"\d{1,2} \w+ 2026, \d{2}:\d{2} · "
+    assert re.fullmatch(dated + "5w ago", rows["Added"])
+    assert re.fullmatch(dated + "2d ago", rows["Opened"])
+    assert "Archived" not in rows
+
+
+def test_details_of_an_archived_item(item):
+    out = console()
+    kept = replace(item, state=State.ARCHIVED, number=3, archived_at=NOW - timedelta(hours=5))
+    render.details(out, kept, now=NOW)
+    text = printed(out)
+    assert "#c" in text
+    assert re.search(r"Archived +\d{1,2} \w+ 2026, \d{2}:\d{2} · 5h ago", text)

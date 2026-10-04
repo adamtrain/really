@@ -39,6 +39,8 @@ from .store import (
     default_path,
     is_lesser,
 )
+from .summarize import SummaryError
+from .summarize import tldr as summarize
 
 MIN_PASTED_WORDS = 20
 WORKERS = 6
@@ -79,6 +81,10 @@ Tags = Annotated[
         help="Tag it. Repeat for more.",
         show_default=False,
     ),
+]
+Note = Annotated[
+    str | None,
+    typer.Option("--note", "-n", help="Why it's worth keeping. Searchable.", show_default=False),
 ]
 AsJson = Annotated[bool, typer.Option("--json", "-j", help="Print JSON instead.")]
 
@@ -301,7 +307,7 @@ def read_now(store: Store, item: Item) -> None:
     out.print(render.card(item, min(out.width, render.READING_WIDTH)))
     if not item.archived:
         hint = (
-            "  When you're done: [bold]really archive[/] to keep it, [bold]really delete[/] not to."
+            "  When you've read it: [bold]really done[/] keeps it, [bold]really delete[/] doesn't."
         )
         out.print(Text.from_markup(hint, style=render.FAINT))
     out.print()
@@ -418,7 +424,7 @@ EPILOG = (
     "  [cyan]really add[/]               queue the link on your clipboard\n"
     "  [cyan]really[/]                   see what's waiting\n"
     "  [cyan]really next 15[/]           open something you can read in 15 minutes\n"
-    "  [cyan]really archive[/]           keep what you just read, text and all\n"
+    "  [cyan]really done[/]              keep what you just read, text and all\n"
     "  [cyan]really delete[/]            …or don't\n"
     "  [cyan]really search neuralese[/]  find it again, months later\n\n"
     f"Your list lives in one SQLite file. Set [bold]${ENV_DB}[/] to move it."
@@ -584,6 +590,60 @@ def open_(ref: Ref) -> None:
 
 
 @app.command(rich_help_panel=READ)
+def info(ref: Ref, as_json: AsJson = False) -> None:
+    """Show the details of one item: what it is, and what's become of it.
+
+    For the saved copy itself, there's [bold]really show[/].
+    """
+    with library() as store:
+        item = find(store, ref)
+    if as_json:
+        print(json.dumps(to_dict(item), indent=2, ensure_ascii=False))
+    else:
+        render.details(out, item)
+
+
+@app.command(rich_help_panel=READ)
+def tldr(ref: Ref) -> None:
+    """Have Claude summarize something from its saved text.
+
+    It needs the full text to be saved, and Claude Code's [bold]claude[/] command.
+    The summary is kept, so it's only ever asked for once.
+    """
+    with library() as store:
+        item = find(store, ref)
+        if not item.words:
+            fail(
+                f"There's no saved copy of #{item.ref} to summarize.",
+                hint=f"[bold]really refresh {item.ref}[/] fetches one.",
+            )
+        if item.paywalled:
+            fail(
+                f"Only the free preview of #{item.ref} is saved, not the full text.",
+                hint="If you can read the whole thing, copy its text and run "
+                f"[bold]really paste {item.ref}[/].",
+            )
+        summary = store.tldr(item.id)
+        if not summary:
+            asking = render.progress_message("Asking Claude", item.name)
+            try:
+                with err.status(asking, spinner_style=render.ACCENT):
+                    summary = summarize(
+                        title=item.name,
+                        author=item.author,
+                        site=item.site or item.host,
+                        text=store.text(item.id),
+                    )
+            except SummaryError as e:
+                fail(str(e), detail=e.detail, hint=e.hint)
+            store.set_tldr(item.id, summary)
+    if out.is_terminal:
+        render.summary(out, item, summary)
+    else:
+        print(summary)
+
+
+@app.command(rich_help_panel=READ)
 def review(
     tag: Annotated[
         str | None,
@@ -650,33 +710,42 @@ def pace() -> None:
     render.pace(out, current, readings)
 
 
-@app.command(rich_help_panel=KEEP)
-def archive(
-    ref: OptionalRef = None,
-    note: Annotated[
-        str | None,
-        typer.Option(
-            "--note",
-            "-n",
-            help="Why it's worth keeping. Searchable.",
-            show_default=False,
-        ),
-    ] = None,
-    tag: Tags = None,
+def shelve(
+    store: Store, client: httpx.Client, item: Item, note: str | None, tags: list[str] | None
 ) -> None:
+    """Archive an item, with a note and tags if given. If it's archived already, update those."""
+    if note is not None:
+        item = store.edit(item.id, note=note)
+    if tags:
+        item = store.set_tags(item.id, [*item.tags, *tags])
+    if item.archived:
+        verb = "Updated" if note is not None or tags else "Already archived"
+        render.receipt(out, verb, item, style=render.ARCHIVE, mark="◆")
+    else:
+        with renumbering(store):
+            keep(store, client, item)
+
+
+@app.command(rich_help_panel=KEEP)
+def archive(ref: OptionalRef = None, note: Note = None, tag: Tags = None) -> None:
     """Keep something you've read, with its full text searchable."""
     with library() as store, new_client() as client:
         item = finished(store, ref, State.QUEUED if ref else None)
-        if note is not None:
-            item = store.edit(item.id, note=note)
-        if tag:
-            item = store.set_tags(item.id, [*item.tags, *tag])
-        if item.archived:
-            verb = "Updated" if note is not None or tag else "Already archived"
-            render.receipt(out, verb, item, style=render.ARCHIVE, mark="◆")
-        else:
-            with renumbering(store):
-                keep(store, client, item)
+        shelve(store, client, item, note, tag)
+
+
+@app.command(rich_help_panel=KEEP)
+def done(note: Note = None, tag: Tags = None) -> None:
+    """Archive what you last opened: [bold]really archive[/] with nothing named."""
+    with library() as store, new_client() as client:
+        item = store.last_opened()
+        if item is None:
+            fail(
+                "There's nothing you've opened and not yet finished.",
+                hint="[bold]really next[/] opens something to read. To archive something you "
+                "didn't open here, name it: [bold]really archive 3[/].",
+            )
+        shelve(store, client, item, note, tag)
 
 
 @app.command(rich_help_panel=KEEP)

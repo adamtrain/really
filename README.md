@@ -65,8 +65,8 @@ really add                 # queue the link on your clipboard
 really                     # see what's waiting
 really next                # open the one that's waited longest
 really next 15             # …or something you can read in 15 minutes
-really archive             # done reading: keep it, full text and all
-really delete              # done reading: don't
+really done                # finished reading: keep it, full text and all
+really delete              # …or don't
 really search lighthouse   # find it again, months later
 ```
 
@@ -77,7 +77,7 @@ Things in your queue are numbered, and things in your archive are lettered. Comm
 on one item take its number (`3`) or its letters (`c`), or else a URL or a few words from the
 title (`really open slow web`). `archive`, `delete` and `paste` can go without: they act on
 whatever you last opened with `really next` or `really open`, which is usually what you've just
-finished reading.
+finished reading. `really done` is `really archive` with nothing named.
 
 ## Getting links in
 
@@ -146,10 +146,29 @@ $ really archive 3
 When the list has got away from you, `really review` shows each item in turn and asks whether to
 open, archive, delete or skip it.
 
+### The short version
+
+```sh
+really tldr 3
+```
+
+That has Claude summarize an article from its saved text: the main point, then the handful of
+claims that carry it. It runs [Claude Code](https://claude.com/claude-code)'s `claude` command,
+asking for Sonnet 5.5 at medium effort and falling back to the latest Sonnet if that isn't
+available to you.
+
+A summary is only made from the full text, so `tldr` refuses when there's no saved copy, or when
+only a paywalled preview is saved. Once made it's kept, and asking again is instant for as long
+as the saved text stays the same. It isn't shown, searched or exported anywhere else.
+
+An article is text off the web, so the Claude session that reads it is given no tools, and none
+of your hooks, MCP servers, skills or `CLAUDE.md`. Whatever the article says, summarizing it is
+all there is to do.
+
 ### Reading times that fit you
 
 <p align="center">
-  <img src="docs/pace.svg" width="760" alt="really archive reports an article archived, going from number 4 in the queue to the letter c in the archive, read in 29 minutes at 246 words a minute. It says your pace is 257 going by 8 timed reads, and that the queue has been renumbered: number 5 is now number 4. Then really pace says you read about 257 words a minute, going by your last 8 timed reads with the 2 fastest and 2 slowest set aside, and lists the eight reads with their word counts, how long each took and its pace. The four counted reads are highlighted, and the others are dimmed and marked as fastest or slowest, set aside.">
+  <img src="docs/pace.svg" width="760" alt="really done reports an article archived, going from number 4 in the queue to the letter c in the archive, read in 29 minutes at 246 words a minute. It says your pace is 257 going by 8 timed reads, and that the queue has been renumbered: number 5 is now number 4. Then really pace says you read about 257 words a minute, going by your last 8 timed reads with the 2 fastest and 2 slowest set aside, and lists the eight reads with their word counts, how long each took and its pace. The four counted reads are highlighted, and the others are dimmed and marked as fastest or slowest, set aside.">
 </p>
 
 Reading times start out assuming 230 words a minute. From then on really measures you: a read is
@@ -173,11 +192,11 @@ Timing what people really do means some of the timings are wrong, so:
 ## Archive and search
 
 <p align="center">
-  <img src="docs/search.svg" width="760" alt="really archive with a note and a tag reports The Slow Web Is Still Here archived with 242 words saved, going from number 6 in the queue to the letter b in the archive. A search for weekly decide finds the archived article lettered a, archived four weeks ago, showing the user's note with both words highlighted and a passage from the article. A search for lighthouse finds the article just archived, with the word highlighted in the note and three times in a passage from its text.">
+  <img src="docs/search.svg" width="760" alt="really done with a note and a tag reports The Slow Web Is Still Here archived with 242 words saved, going from number 6 in the queue to the letter b in the archive. A search for weekly decide finds the archived article lettered a, archived four weeks ago, showing the user's note with both words highlighted and a passage from the article. A search for lighthouse finds the article just archived, with the word highlighted in the note and three times in a passage from its text.">
 </p>
 
 ```sh
-really archive --note "The lighthouse problem" -t reading
+really done --note "The lighthouse problem" -t reading
 really search lighthouse
 really show slow web          # read your saved copy in the terminal
 really list --archive
@@ -233,9 +252,12 @@ login.
 | `really list` | The queue; `--archive` or `--all` for the rest. Filter with `-t TAG`, order with `--sort added\|length\|title` |
 | `really next [MINUTES]` | Open the next thing to read |
 | `really open ITEM` | Open a particular one |
+| `really info ITEM` | The details of one item: what it is, its note and tags, and its history |
+| `really tldr ITEM` | Claude's summary of the saved text, made once and kept |
 | `really review` | Go through the queue one by one |
 | `really pace` | How fast you read, and the timed reads that says so |
 | `really archive [ITEM]` | Keep something, with an optional `--note` and tags |
+| `really done` | Archive what you last opened; takes `--note` and tags too |
 | `really delete [ITEMS]…` | Forget something. Asks first if it's in the archive |
 | `really search WORDS…` | Full-text search; `--archive` or `--queue` to narrow it |
 | `really show ITEM` | Read the saved copy. Piped, it prints plain Markdown |
@@ -248,7 +270,7 @@ login.
 | `really export [DIR]` | Write the archive as Markdown files, or `--json` for everything |
 | `really stats` | Counts, reading time, and where your list is stored |
 
-`list`, `search` and `show` take `--json` for scripts. Results go to stdout; progress and errors
+`list`, `search`, `info` and `show` take `--json` for scripts. Results go to stdout; progress and errors
 go to stderr. really exits with `0` when it's done what you asked and `1` when it couldn't.
 
 Your list is one file: `~/Library/Application Support/really/really.db` on macOS,
@@ -332,6 +354,7 @@ src/really/
 ├── extract.py    # title, author and article text from HTML and PDFs
 ├── store.py      # the SQLite file and its full-text index
 ├── pace.py       # working out your reading speed from timed reads
+├── summarize.py  # asking Claude for a summary, through the claude command
 ├── safari.py     # reading Safari's Reading List
 ├── export.py     # Markdown and JSON export
 └── render.py     # everything you see

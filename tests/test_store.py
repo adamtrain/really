@@ -497,7 +497,7 @@ def test_a_list_from_before_things_were_numbered_is_numbered(tmp_path):
         ]
         assert store.search("keepsake9")[0].item.ref == "a"
         assert store.add("https://example.com/new").ref == "4"
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with Store(path) as store:  # and opening it again changes nothing
         assert [item.ref for item in store.items()] == ["1", "2", "3", "4", "a", "b"]
 
@@ -588,6 +588,66 @@ def test_the_estimate_follows_a_change_of_pace(store):
     for _ in range(RECENT):
         store.record(Reading(4000, 600, datetime.now(UTC)))  # 400
     assert store.pace() == Pace(400, readings=RECENT, counted=30)
+
+
+# ── Summaries ─────────────────────────────────────────────────────────────────
+
+
+def test_a_summary_is_kept_with_its_item(store, lesson):
+    assert store.tldr(lesson.id) == ""
+    store.set_tldr(lesson.id, "General methods win.")
+    assert store.tldr(lesson.id) == "General methods win."
+    assert store.text(lesson.id) == LESSON.text
+    assert store.tldr(999) == store.text(999) == ""
+
+
+def test_a_summary_is_nowhere_but_where_it_is_asked_for(store, lesson):
+    store.set_tldr(lesson.id, "A summary mentioning zeppelins.")
+    assert store.get(lesson.id) == lesson  # the item itself is unchanged
+    assert store.search("zeppelins") == []
+    assert "zeppelins" not in store.content(lesson.id)
+
+
+def test_a_summary_lasts_as_long_as_the_text_it_summarizes(store, lesson):
+    store.set_tldr(lesson.id, "General methods win.")
+    store.set_article(lesson.id, LESSON)  # fetched again, and nothing has changed
+    assert store.tldr(lesson.id) == "General methods win."
+    store.archive(lesson.id)
+    store.edit(lesson.id, note="Read twice")
+    assert store.tldr(lesson.id) == "General methods win."
+    store.set_article(lesson.id, CAFE)  # the page says something else now
+    assert store.tldr(lesson.id) == ""
+    store.set_tldr(lesson.id, "About a café.")
+    store.set_text(lesson.id, "A different text altogether, pasted in by hand.")
+    assert store.tldr(lesson.id) == ""
+
+
+def test_a_list_from_before_summaries_gains_a_place_for_them(tmp_path):
+    path = tmp_path / "really.db"
+    old = sqlite3.connect(path)
+    for script in MIGRATIONS[:3]:
+        old.executescript(script)
+    old.execute("PRAGMA user_version = 3")
+    old.execute(
+        "INSERT INTO items (url, title, text, words, number, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            "https://example.com/old",
+            "From Before",
+            "an heirloom",
+            2,
+            1,
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    old.commit()
+    old.close()
+    with Store(path) as store:
+        [item] = store.items()
+        assert (item.title, item.ref, store.tldr(item.id)) == ("From Before", "1", "")
+        store.set_tldr(item.id, "An heirloom.")
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+    with Store(path) as store:
+        assert store.tldr(1) == "An heirloom."
 
 
 # ── The file ──────────────────────────────────────────────────────────────────

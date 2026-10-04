@@ -180,8 +180,8 @@ def queue_summary(console: Console, items: list[Item], *, now: datetime | None =
     )
     started = [item for item in items if item.opened_at]
     hint = (
-        f"  [{ACCENT}]▸[/] opened: [bold]really archive[/] or [bold]really delete[/] "
-        "when you're done"
+        f"  [{ACCENT}]▸[/] opened: [bold]really done[/] or [bold]really delete[/] "
+        "when you've read it"
         if started
         else "  [bold]really next[/] opens the one at the top"
     )
@@ -193,7 +193,7 @@ def archive_summary(console: Console, items: list[Item]) -> None:
     console.print()
     if not items:
         console.print(Text.assemble(("◆ ", ARCHIVE), ("Nothing archived yet.", "bold")))
-        console.print(Text.from_markup("  [bold]really archive[/] keeps what you've read."))
+        console.print(Text.from_markup("  [bold]really done[/] keeps what you've just read."))
     else:
         words = sum(item.words for item in items)
         console.print(
@@ -377,6 +377,39 @@ def card(item: Item, width: int, *, now: datetime | None = None) -> Panel:
     )
 
 
+def _dated(moment: datetime, now: datetime | None) -> Text:
+    """A moment as your own clock showed it, and how long ago that was."""
+    local = moment.astimezone()
+    text = Text(f"{local.day} {local:%B %Y}, {local:%H:%M}")
+    return text.append(f" · {_when(moment, now)}", style=FAINT)
+
+
+def details(console: Console, item: Item, *, now: datetime | None = None) -> None:
+    """An item's card, and under it what the card leaves out: its saved copy and its history."""
+    width = min(_width(console), READING_WIDTH)
+    grid = Table.grid(padding=(0, 3))
+    grid.add_column(style=FAINT, no_wrap=True)
+    grid.add_column()
+    if item.words:
+        copy = Text(f"{item.words:,} words")
+        if item.paywalled:
+            copy.append(", the free preview only", style=STALE)
+        if item.fetched_at:
+            copy.append(f" · fetched {_when(item.fetched_at, now)}", style=FAINT)
+    else:
+        copy = Text.from_markup(f"none · [bold]really refresh {item.ref}[/] fetches one")
+    grid.add_row("Saved copy", copy)
+    grid.add_row("Added", _dated(item.added_at, now))
+    if item.opened_at:
+        grid.add_row("Opened", _dated(item.opened_at, now))
+    if item.archived_at:
+        grid.add_row("Archived", _dated(item.archived_at, now))
+    console.print()
+    console.print(card(item, width, now=now))
+    console.print(Padding(grid, (0, 0, 0, 3)), width=width)
+    console.print()
+
+
 def article(console: Console, item: Item, content: str) -> None:
     """An item's card, then its saved copy."""
     width = min(_width(console), READING_WIDTH)
@@ -388,6 +421,19 @@ def article(console: Console, item: Item, content: str) -> None:
     else:
         message = "No saved copy. [bold]really refresh {id}[/] fetches one."
         console.print(Text.from_markup("  " + message.format(id=item.ref), style=FAINT))
+    console.print()
+
+
+def summary(console: Console, item: Item, text: str) -> None:
+    """A summary of an item, under a line saying which item it is."""
+    width = min(_width(console), READING_WIDTH)
+    color = ARCHIVE if item.archived else ACCENT
+    heading = Text.assemble((f"#{item.ref} ", f"bold {color}")).append_text(_title(item))
+    console.print()
+    console.print(heading, no_wrap=True, overflow="ellipsis")
+    console.print(_facts(item), no_wrap=True, overflow="ellipsis")
+    console.print()
+    console.print(Padding(Markdown(text), (0, 2)), width=width)
     console.print()
 
 

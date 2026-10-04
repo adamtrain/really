@@ -113,8 +113,14 @@ UPDATE items SET number = (
 CREATE UNIQUE INDEX items_number ON items (state, number);
 """
 
+# Summaries are kept so that one is only ever asked for once. They sit outside FIELDS on
+# purpose: nothing lists, searches or exports them.
+SUMMARIES = """
+ALTER TABLE items ADD COLUMN tldr TEXT NOT NULL DEFAULT '';
+"""
+
 # Each script takes the file from one version to the next; a new file runs them all.
-MIGRATIONS = (SCHEMA, READINGS, NUMBERS)
+MIGRATIONS = (SCHEMA, READINGS, NUMBERS, SUMMARIES)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 # The next free place in a list: one past its last.
@@ -404,6 +410,16 @@ class Store:
         row = self.db.execute("SELECT content FROM items WHERE id = ?", (id,)).fetchone()
         return row["content"] if row else ""
 
+    def text(self, id: int) -> str:
+        """The saved copy of an item, as plain text. Empty if there isn't one."""
+        row = self.db.execute("SELECT text FROM items WHERE id = ?", (id,)).fetchone()
+        return row["text"] if row else ""
+
+    def tldr(self, id: int) -> str:
+        """The summary on record for an item's saved copy. Empty if none has been made."""
+        row = self.db.execute("SELECT tldr FROM items WHERE id = ?", (id,)).fetchone()
+        return row["tldr"] if row else ""
+
     def last_opened(self) -> Item | None:
         """The queued item you opened most recently: the one you're presumably done reading."""
         row = self.db.execute(
@@ -595,6 +611,8 @@ class Store:
                 "words": article.words,
                 "paywalled": article.paywalled,
             }
+            if article.text != self.text(id):
+                columns["tldr"] = ""  # what's on record summarizes a text that's gone
         # Follow the link to wherever it really leads, unless that's already a different item.
         if url and url != item.url and self.by_url(url) is None:
             columns["url"] = url
@@ -602,7 +620,12 @@ class Store:
 
     def set_text(self, id: int, text: str) -> Item:
         """Replace the saved copy with text you supply, for pages only your browser can read."""
-        return self._set(id, content=text, text=text, words=len(text.split()), paywalled=False)
+        return self._set(
+            id, content=text, text=text, words=len(text.split()), paywalled=False, tldr=""
+        )
+
+    def set_tldr(self, id: int, summary: str) -> None:
+        self._set(id, tldr=summary)
 
     def edit(self, id: int, **fields: str) -> Item:
         allowed = {"url", "title", "author", "site", "published", "summary", "note"}
