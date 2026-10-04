@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/hero.svg" width="860" alt="really adding a link from the clipboard. The link is a long Substack email redirect; really reports it added as number 7, The Slow Web Is Still Here by Ada Quill in Margin Notes, a 1 minute read. Then really on its own lists the queue: six items with their titles, tags, authors and publications, reading times and ages. The oldest ages are highlighted in red and amber, one item is marked as opened, and a summary line says there are 6 things to read, about 1 hour 2 minutes.">
+  <img src="docs/hero.svg" width="860" alt="really adding a link from the clipboard. The link is a long Substack email redirect; really reports it added as number 6, The Slow Web Is Still Here by Ada Quill in Margin Notes, a 1 minute read. Then really on its own lists the queue: six items numbered 1 to 6, with their titles, tags, authors and publications, reading times and ages. The oldest ages are highlighted in red and amber, one item is marked as opened, and a summary line says there are 6 things to read, about 1 hour 2 minutes.">
 </p>
 
 ## Why really
@@ -25,8 +25,9 @@
 - **Two words to save something.** `really add` takes the link on your clipboard. Arguments and
   pipes work too.
 - **Newsletter links, untangled.** really follows click-trackers and redirects to the article
-  itself and drops the tracking parameters, so a post has one address however you came by it.
-  Substack's emailed, shared and in-app links all land on the same clean URL.
+  itself, and drops whatever comes after the `?` or `#` unless it's part of the article's
+  address. A post has one address however you came by it: Substack's emailed, shared and in-app
+  links all land on the same clean URL.
 - **It knows what it's holding.** Title, author, publication and length are worked out from the
   page.
 - **Reading times that are yours.** really times how long things actually take you and bases
@@ -72,10 +73,11 @@ really search lighthouse   # find it again, months later
 A link is in one of two places. It starts in your **queue**. Once you've read it, you either
 `archive` it, which keeps it for good and makes it searchable, or `delete` it.
 
-Commands that act on one item take an id (`7`), a URL, or a few words from the title
-(`really open slow web`). `archive`, `delete` and `paste` can go without: they act on whatever
-you last opened with `really next` or `really open`, which is usually what you've just finished
-reading.
+Things in your queue are numbered, and things in your archive are lettered. Commands that act
+on one item take its number (`3`) or its letters (`c`), or else a URL or a few words from the
+title (`really open slow web`). `archive`, `delete` and `paste` can go without: they act on
+whatever you last opened with `really next` or `really open`, which is usually what you've just
+finished reading.
 
 ## Getting links in
 
@@ -119,14 +121,27 @@ Security) for this one command.
 
 | | |
 | --- | --- |
-| **#** | The id you refer to an item by. A `▸` marks ones you've opened but not yet archived or deleted. |
+| **#** | What to call it: its place in the queue, counting from 1. A `▸` marks ones you've opened but not yet archived or deleted. |
 | **From** | Who wrote it and where, as far as the page says. |
 | **Read** | How long it will take you, at [your pace](#reading-times-that-fit-you), not counting footnotes. A `+` means at least that: the post is paywalled and only its preview could be read. |
 | **Added** | How long it's been waiting. Amber after 30 days, red after 90. |
 
-The queue is listed oldest first, and `really next` opens the one at the top. Give it a number
-of minutes to get something that fits the time you have, `--random` to be surprised, or `--peek`
-to see what's next without opening it.
+The queue is listed in the order things joined it, and `really next` opens the one at the top.
+Give it a number of minutes to get something that fits the time you have, `--random` to be
+surprised, or `--peek` to see what's next without opening it.
+
+The numbers are always 1, 2, 3 and so on, with none missing. When something leaves the queue,
+whatever was behind it moves up, and a new link takes the first number free. Archiving turns a
+number into letters: `a`, `b`, through `z`, then `aa`, `ab`. The archive closes up the same way
+when you delete from it or send something back to the queue. Since this changes what things are
+called, really tells you each time:
+
+```
+$ really archive 3
+◆ Archived #3 → #c The Slow Web Is Still Here
+  Ada Quill · Margin Notes · 9 min · 2,012 words saved
+  Queue renumbered: #4 to #6 are now #3 to #5.
+```
 
 When the list has got away from you, `really review` shows each item in turn and asks whether to
 open, archive, delete or skip it.
@@ -134,7 +149,7 @@ open, archive, delete or skip it.
 ### Reading times that fit you
 
 <p align="center">
-  <img src="docs/pace.svg" width="760" alt="really archive reports an article archived, read in 29 minutes at 246 words a minute, and says your pace is 257 going by 8 timed reads. Then really pace says you read about 257 words a minute, going by your last 8 timed reads with the 2 fastest and 2 slowest set aside, and lists the eight reads with their word counts, how long each took and its pace. The four counted reads are highlighted, and the others are dimmed and marked as fastest or slowest, set aside.">
+  <img src="docs/pace.svg" width="760" alt="really archive reports an article archived, going from number 4 in the queue to the letter c in the archive, read in 29 minutes at 246 words a minute. It says your pace is 257 going by 8 timed reads, and that the queue has been renumbered: number 5 is now number 4. Then really pace says you read about 257 words a minute, going by your last 8 timed reads with the 2 fastest and 2 slowest set aside, and lists the eight reads with their word counts, how long each took and its pace. The four counted reads are highlighted, and the others are dimmed and marked as fastest or slowest, set aside.">
 </p>
 
 Reading times start out assuming 230 words a minute. From then on really measures you: a read is
@@ -158,7 +173,7 @@ Timing what people really do means some of the timings are wrong, so:
 ## Archive and search
 
 <p align="center">
-  <img src="docs/search.svg" width="760" alt="really archive with a note and a tag reports The Slow Web Is Still Here archived with 242 words saved. A search for weekly decide finds an article archived four weeks ago, showing the user's note with both words highlighted and a passage from the article. A search for lighthouse finds the article just archived, with the word highlighted in the note and three times in a passage from its text.">
+  <img src="docs/search.svg" width="760" alt="really archive with a note and a tag reports The Slow Web Is Still Here archived with 242 words saved, going from number 6 in the queue to the letter b in the archive. A search for weekly decide finds the archived article lettered a, archived four weeks ago, showing the user's note with both words highlighted and a passage from the article. A search for lighthouse finds the article just archived, with the word highlighted in the note and three times in a passage from its text.">
 </p>
 
 ```sh
@@ -224,7 +239,7 @@ login.
 | `really delete [ITEMS]…` | Forget something. Asks first if it's in the archive |
 | `really search WORDS…` | Full-text search; `--archive` or `--queue` to narrow it |
 | `really show ITEM` | Read the saved copy. Piped, it prints plain Markdown |
-| `really requeue ITEM` | Move something from the archive back to the queue |
+| `really requeue ITEM` | Move something from the archive to the end of the queue |
 | `really tag ITEM [TAGS]…` | Add tags, or `--remove` them |
 | `really edit ITEM` | Correct the `--title`, `--author`, `--site` or `--published` date, or change your `--note` |
 | `really paste [ITEM]` | Use the clipboard's text as the saved copy |
@@ -257,6 +272,12 @@ what strips a newsletter's tracking, and what makes one post reached three ways 
 But sites get canonical links wrong too, so one is only believed if it's on the same site and
 has the same path, or still contains the last part of the path that was fetched.
 
+A link is saved without its query string or anchor, unless the query string is part of the
+address. Most only record how you came by the link (`?ref=…`, `?share=…`), but some are where
+the page is (`watch?v=…`, `item?id=…`). A believable canonical link settles which. Without one,
+really fetches the link once more with the query string removed: if the same article comes back
+it was decoration, and if anything else does it stays.
+
 [trafilatura](https://trafilatura.readthedocs.io) finds the article in the page. really keeps two
 copies: Markdown with the links intact, which is what you read and export, and plain text, which
 is what gets searched. PDFs are read with [pypdf](https://pypdf.readthedocs.io).
@@ -279,7 +300,9 @@ deletes its copy.
 
 Everything lives in SQLite, with an [FTS5](https://www.sqlite.org/fts5.html) index kept in step
 by triggers. Results are ranked with BM25, weighted so a match in a title, tag or note counts
-for more than one in the body.
+for more than one in the body. An item's number or letters are only its place in a list. Under
+them each has a permanent id, which is what `--json` output calls `id` (the changeable name is
+`ref`) and what exported files are named with.
 
 What's inferred can be wrong. A page with no byline has no author, and a page that only renders
 with JavaScript has no text. `really edit` fixes the former and `really paste` the latter.

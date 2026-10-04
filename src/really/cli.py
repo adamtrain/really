@@ -26,7 +26,7 @@ from rich.text import Text
 from . import __version__, render, safari, urls
 from .clipboard import ClipboardError, read_clipboard
 from .export import to_dict, write_markdown
-from .extract import Article, extract
+from .extract import Article, extract, same_article
 from .fetch import FetchError, Page, fetch, new_client
 from .store import (
     ENV_DB,
@@ -215,7 +215,7 @@ def capture(
         return Capture(store.add(address, tags=tags), new=True)
     try:
         # With its tracking parameters still on: a newsletter's redirector may need them.
-        landed, article = understand(link, fetch(urls.page_of(link), client))
+        landed, article = understand(link, fetch(urls.page_of(link), client), client)
     except FetchError as e:
         return Capture(store.add(address, tags=tags), new=True, problem=str(e))
     if existing := store.by_url(landed):
@@ -223,28 +223,49 @@ def capture(
     return Capture(store.add(landed, article, fetched=True, tags=tags), new=True)
 
 
-def understand(link: str, page: Page) -> tuple[str, Article]:
+def understand(link: str, page: Page, client: httpx.Client) -> tuple[str, Article]:
     """Work out what a fetched page is, and the address it should be known by."""
     # Being bounced to a login page must not replace the link with the login page's address.
     if urls.is_sign_in(page.url) and not urls.is_sign_in(link):
         raise FetchError("it sends you to a sign-in page")
     article = extract(page)
-    return urls.clean(article.canonical or page.url), article
+    return address_of(page, article, client), article
 
 
-def recapture(store: Store, item: Item, page: Page) -> Item:
-    address, article = understand(item.url, page)
+def address_of(page: Page, article: Article, client: httpx.Client) -> str:
+    """The address to know a page by: nothing after the path, unless that's part of where it is.
+
+    Most query strings only say how you came by a link (?ref=…, ?share=…), but some are the
+    address itself (watch?v=…, item?id=…). If the page gives its own address, that settles it.
+    If not, the link is tried without its query string: the same article means the query was
+    decoration, and anything else means it stays.
+    """
+    if article.canonical:
+        return urls.clean(article.canonical)
+    address = urls.clean(page.url)
+    bare = urls.bare(address)
+    if bare == address:
+        return address
+    try:
+        without = extract(fetch(bare, client))
+    except FetchError:
+        return address
+    return bare if same_article(article, without) else address
+
+
+def recapture(store: Store, item: Item, page: Page, client: httpx.Client) -> Item:
+    address, article = understand(item.url, page, client)
     return store.set_article(item.id, article, address)
 
 
-def report_refetch(item: Item, page: Page | FetchError, store: Store) -> bool:
+def report_refetch(item: Item, page: Page | FetchError, store: Store, client: httpx.Client) -> bool:
     """Record one freshly fetched page and say what came of it. False if it couldn't be read."""
     try:
         if isinstance(page, FetchError):
             raise page
-        address, article = understand(item.url, page)
+        address, article = understand(item.url, page, client)
     except FetchError as e:
-        render.error(out, f"#{item.id} {item.name}", detail=f"Couldn't fetch it: {e}.")
+        render.error(out, f"#{item.ref} {item.name}", detail=f"Couldn't fetch it: {e}.")
         return False
     kept = bool(item.words) and is_lesser(article, item)
     item = store.set_article(item.id, article, address)
@@ -286,31 +307,50 @@ def read_now(store: Store, item: Item) -> None:
     out.print()
 
 
+@contextmanager
+def renumbering(store: Store) -> Iterator[None]:
+    """Afterwards, say which items the block left with a new number or new letters.
+
+    Whatever leaves the queue or the archive, the rest close up behind it. Something that
+    changed lists isn't mentioned here: its receipt says what it was and what it is now.
+    """
+    before = {item.id: (item.state, item.number) for item in store.items()}
+    yield
+    for state in State:
+        moves = []
+        for item in store.items(state):
+            was = before.get(item.id)
+            if was and was[0] is state and was[1] != item.number:
+                moves.append((was[1], item.number))
+        render.renumbered(out, state, moves)
+
+
 def keep(store: Store, client: httpx.Client, item: Item) -> Item:
     """Archive an item, first fetching a copy if there isn't one yet."""
     problem = ""
     if not item.words:
         try:
             with err.status(render.progress_message("Saving a copy", item.url)):
-                item = recapture(store, item, fetch(item.url, client))
+                item = recapture(store, item, fetch(item.url, client), client)
         except FetchError as e:
             problem = str(e)
     reading = store.finish(item.id)
+    was = item.ref
     item = store.archive(item.id)
     saved = f"{item.words:,} words saved" if item.words else "no copy saved"
-    render.receipt(out, "Archived", item, saved, style=render.ARCHIVE, mark="◆")
+    render.receipt(out, "Archived", item, saved, style=render.ARCHIVE, mark="◆", was=was)
     if item.paywalled:
         render.note(
             out,
             "It's paywalled, so that's only the free preview. For the whole thing, copy the "
-            f"article's text and run [bold]really paste {item.id}[/].",
+            f"article's text and run [bold]really paste {item.ref}[/].",
         )
     elif not item.words:
         reason = f" ({problem})" if problem else ""
         render.note(
             out,
             f"Couldn't get the text{reason}. The link is archived; "
-            f"[bold]really refresh {item.id}[/] tries again.",
+            f"[bold]really refresh {item.ref}[/] tries again.",
         )
     if reading:
         render.timed(out, reading, store.pace())
@@ -460,7 +500,7 @@ def add(
                 render.note(
                     out,
                     f"Couldn't fetch it: {result.problem}. The link is saved; "
-                    f"[bold]really refresh {item.id}[/] tries again.",
+                    f"[bold]really refresh {item.ref}[/] tries again.",
                 )
             elif item.paywalled:
                 render.note(out, "It's paywalled: only the free preview could be read.")
@@ -560,7 +600,8 @@ def review(
         if not queue:
             render.queue_summary(out, [])
             return
-        for position, item in enumerate(queue, 1):
+        for position, waiting in enumerate(queue, 1):
+            item = store.get(waiting.id) or waiting  # its number may have changed since
             out.print()
             out.print(Text(f"{position} of {len(queue)}", style=render.FAINT))
             out.print(render.card(item, min(out.width, render.READING_WIDTH)))
@@ -582,12 +623,13 @@ def review(
                     store.mark_opened(item.id)
             if choice == "q":
                 break
-            if choice == "a":
-                keep(store, client, item)
-                tally["archived"] += 1
-            elif choice == "d":
-                discard(store, item)
-                tally["deleted"] += 1
+            with renumbering(store):
+                if choice == "a":
+                    keep(store, client, item)
+                    tally["archived"] += 1
+                elif choice == "d":
+                    discard(store, item)
+                    tally["deleted"] += 1
         left = store.count(State.QUEUED)
     done = [f"{count} {what}" for what, count in tally.items()] or ["Nothing changed"]
     out.print()
@@ -633,7 +675,8 @@ def archive(
             verb = "Updated" if note is not None or tag else "Already archived"
             render.receipt(out, verb, item, style=render.ARCHIVE, mark="◆")
         else:
-            keep(store, client, item)
+            with renumbering(store):
+                keep(store, client, item)
 
 
 @app.command(rich_help_panel=KEEP)
@@ -653,13 +696,17 @@ def delete(
 ) -> None:
     """Forget something, whether you read it or just changed your mind."""
     with library() as store:
-        items = [find(store, ref) for ref in refs] if refs else [finished(store, None)]
-        for item in items:
-            if item.archived and not yes:
-                err.print(Text.assemble((f"#{item.id} ", render.ARCHIVE), (item.name, "bold")))
-                if not typer.confirm("That's in your archive. Delete it for good?", err=True):
-                    continue
-            discard(store, item)
+        # All looked up before any is deleted, since each deletion renumbers the rest. They're
+        # reported by what you called them, and what the others are called now is said at the end.
+        named = [find(store, ref) for ref in refs] if refs else [finished(store, None)]
+        with renumbering(store):
+            for item in {item.id: item for item in named}.values():
+                if item.archived and not yes:
+                    title = Text.assemble((f"#{item.ref} ", render.ARCHIVE), (item.name, "bold"))
+                    err.print(title)
+                    if not typer.confirm("That's in your archive. Delete it for good?", err=True):
+                        continue
+                discard(store, item)
 
 
 app.command("rm", hidden=True)(delete)
@@ -729,8 +776,9 @@ def requeue(ref: Ref) -> None:
     with library() as store:
         item = find(store, ref, State.ARCHIVED)
         if not item.archived:
-            fail(f"#{item.id} is already in your queue.")
-        render.receipt(out, "Back in your queue:", store.requeue(item.id))
+            fail(f"#{item.ref} is already in your queue.")
+        with renumbering(store):
+            render.receipt(out, "Requeued", store.requeue(item.id), was=item.ref)
 
 
 @app.command(rich_help_panel=UPKEEP)
@@ -846,7 +894,7 @@ def refresh(
             pages = fetch_all(client, [item.url for item in items])
             for done, (item, page) in enumerate(zip(items, pages, strict=True), 1):
                 status.update(render.progress_message(f"Fetching {done} of {len(items)}", item.url))
-                failures += not report_refetch(item, page, store)
+                failures += not report_refetch(item, page, store, client)
     if failures:
         raise typer.Exit(1)
 

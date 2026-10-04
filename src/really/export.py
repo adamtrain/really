@@ -14,7 +14,8 @@ from .store import Item
 def to_dict(item: Item, content: str | None = None) -> dict:
     """An item as JSON-ready data. Pass `content` to include the saved copy."""
     data = {
-        "id": item.id,
+        "id": item.id,  # permanent
+        "ref": item.ref,  # what to call it right now: a number in the queue, letters once archived
         "url": item.url,
         "title": item.name,
         "author": item.author,

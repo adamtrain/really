@@ -1,7 +1,7 @@
 import subprocess
 import sys
 
-from really.extract import extract
+from really.extract import Article, extract, same_article
 from really.fetch import Page
 
 from .conftest import BLOG, FORUM, FORUM_IN_SEQUENCE, LANDED, PAYWALLED, POST, html, page, pdf
@@ -200,6 +200,26 @@ def test_a_date_lying_around_in_a_script_is_not_a_publication_date():
         dated(body='<script>window.settings = {"reviewEnds": "2031-02-01T08:00:00Z"}</script>')
         == ""
     )
+
+
+# ── Telling whether two fetches got the same thing ────────────────────────────
+
+
+def test_same_article():
+    essay = Article(title="On Queues", text="A queue is a promise. " * 100)
+    assert same_article(essay, essay)
+    counter_ticked = Article(title="On Queues", text=essay.text + "1,204 views")
+    assert same_article(essay, counter_ticked)
+
+
+def test_not_the_same_article():
+    essay = Article(title="On Queues", text="A queue is a promise. " * 100)
+    assert not same_article(essay, Article(title="Home", text=essay.text))
+    assert not same_article(essay, Article(title="On Queues", text="Something else. " * 100))
+    assert not same_article(essay, Article(title="On Queues", text=essay.text[:900]))  # a preview
+    assert not same_article(
+        Article(title="A Video"), Article(title="A Video")
+    )  # nothing to compare
 
 
 # ── Other things pages get up to ──────────────────────────────────────────────

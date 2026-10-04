@@ -8,7 +8,7 @@ from rich.console import Console
 from really import render
 from really.extract import Article
 from really.pace import Pace, Reading, estimate
-from really.store import MARK, UNMARK, Hit
+from really.store import MARK, UNMARK, Hit, State
 
 NOW = datetime(2026, 10, 3, 12, tzinfo=UTC)
 
@@ -203,3 +203,48 @@ def test_pace_view_only_lists_the_latest():
     render.pace(out, estimate(readings), readings, now=NOW)
     assert "the 6 fastest and 6 slowest set aside" in printed(out)
     assert "and 18 before those" in printed(out)
+
+
+def test_a_receipt_shows_what_something_was_called_and_is_called_now(item):
+    out = console()
+    render.receipt(out, "Archived", replace(item, state=State.ARCHIVED, number=3), was="7")
+    assert "Archived #7 → #c The Bitter Lesson" in printed(out)
+    out = console()
+    render.receipt(out, "Requeued", replace(item, number=12), was="c")
+    assert "Requeued #c → #12 The Bitter Lesson" in printed(out)
+
+
+@pytest.mark.parametrize(
+    ("state", "moves", "told"),
+    [
+        (State.QUEUED, [(4, 3)], "Queue renumbered: #4 is now #3."),
+        (State.QUEUED, [(4, 3), (5, 4), (6, 5)], "Queue renumbered: #4 to #6 are now #3 to #5."),
+        (
+            State.QUEUED,
+            [(6, 4), (2, 1), (5, 3)],
+            "Queue renumbered: #2 is now #1; #5 to #6 are now #3 to #4.",
+        ),
+        (State.ARCHIVED, [(4, 3), (5, 4)], "Archive relettered: #d to #e are now #c to #d."),
+        (State.ARCHIVED, [(27, 26)], "Archive relettered: #aa is now #z."),
+        (
+            State.QUEUED,
+            [(n * 2, n) for n in range(1, 8)],
+            "Queue renumbered: 7 others have new numbers.",
+        ),
+        (
+            State.ARCHIVED,
+            [(n * 2, n) for n in range(1, 8)],
+            "Archive relettered: 7 others have new letters.",
+        ),
+    ],
+)
+def test_renumbered(state, moves, told):
+    out = console()
+    render.renumbered(out, state, moves)
+    assert printed(out).strip() == told
+
+
+def test_nothing_is_said_when_nothing_moved():
+    out = console()
+    render.renumbered(out, State.QUEUED, [])
+    assert printed(out) == ""

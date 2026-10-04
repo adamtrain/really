@@ -68,6 +68,12 @@ def test_a_link_to_one_comment_is_a_link_to_its_page():
     assert urls.page_of("https://example.com/a?b=1") == "https://example.com/a?b=1"
 
 
+def test_bare_is_a_link_with_nothing_after_the_path():
+    assert urls.bare("https://example.com/post?id=42&ref=x#notes") == "https://example.com/post"
+    assert urls.bare("https://example.com/post") == "https://example.com/post"
+    assert urls.bare("https://app.example/?tab=2#/inbox/3") == "https://app.example/#/inbox/3"
+
+
 def test_clean_is_idempotent():
     once = urls.clean("https://example.com/a?b=1&utm_source=x#top")
     assert urls.clean(once) == once

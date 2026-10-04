@@ -7,6 +7,7 @@ from really.extract import Article
 from really.pace import DEFAULT_WPM, RECENT, Pace, Reading
 from really.store import (
     ENV_DB,
+    LONGEST_CODE,
     MARK,
     MIGRATIONS,
     SCHEMA_VERSION,
@@ -17,6 +18,8 @@ from really.store import (
     Store,
     StoreError,
     default_path,
+    from_letters,
+    letters,
     match_expression,
     normalize_tags,
 )
@@ -79,15 +82,18 @@ def test_urls_are_unique(store, lesson):
         store.add(lesson.url)
 
 
-def test_items_come_oldest_first_and_filter(store):
+def test_items_come_in_the_order_they_joined_and_filter(store):
     now = datetime.now(UTC)
-    new = store.add("https://example.com/new", added_at=now, tags=["a"])
-    old = store.add("https://example.com/old", added_at=now - timedelta(days=9), tags=["a", "b"])
+    first = store.add("https://example.com/first", added_at=now, tags=["a"])
+    older = store.add(
+        "https://example.com/older", added_at=now - timedelta(days=9), tags=["a", "b"]
+    )
     kept = store.archive(store.add("https://example.com/kept").id)
-    assert store.items(State.QUEUED) == [old, new]
+    assert store.items(State.QUEUED) == [first, older]  # by when they were queued, not dated
     assert store.items(State.ARCHIVED) == [kept]
-    assert store.items(tag="b") == [old]
-    assert store.items(tag="#A") == [old, new]
+    assert store.items() == [first, older, kept]  # the queue, then the archive
+    assert store.items(tag="b") == [older]
+    assert store.items(tag="#A") == [first, older]
     assert len(store.items()) == 3
     assert store.count(State.QUEUED) == 2
 
@@ -212,7 +218,7 @@ def test_resolve(store, lesson, cafe):
 
 def test_resolve_refuses_to_guess(store, lesson, cafe):
     with pytest.raises(Ambiguous) as e:
-        store.resolve("e")
+        store.resolve("example")
     assert e.value.matches == [lesson, cafe]
     with pytest.raises(NotFound):
         store.resolve("zebra")
@@ -224,10 +230,10 @@ def test_resolve_refuses_to_guess(store, lesson, cafe):
 
 def test_resolve_can_be_limited_to_a_state(store, lesson, cafe):
     store.archive(cafe.id)
-    assert store.resolve("e", State.QUEUED) == lesson
+    assert store.resolve("example", State.QUEUED) == lesson
     with pytest.raises(NotFound, match="queue"):
         store.resolve("café", State.QUEUED)
-    assert store.resolve(str(cafe.id), State.QUEUED).id == cafe.id  # an id always works
+    assert store.resolve("a", State.QUEUED).id == cafe.id  # its letter always finds it
 
 
 # ── Changing things ───────────────────────────────────────────────────────────
@@ -325,6 +331,175 @@ def test_stats(store, lesson, cafe):
     assert (numbers.added_lately, numbers.archived_lately) == (2, 1)
     assert ("ml", 1) in numbers.tags
     assert ("Fieldnotes", 1) in numbers.sites
+
+
+# ── What things are called ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("number", "code"),
+    [
+        (1, "a"),
+        (2, "b"),
+        (26, "z"),
+        (27, "aa"),
+        (28, "ab"),
+        (52, "az"),
+        (53, "ba"),
+        (702, "zz"),
+        (703, "aaa"),
+        (18278, "zzz"),
+        (18279, "aaaa"),
+    ],
+)
+def test_letters_count_like_spreadsheet_columns(number, code):
+    assert letters(number) == code
+    assert from_letters(code) == from_letters(code.upper()) == number
+
+
+def test_letters_and_numbers_round_trip():
+    assert all(from_letters(letters(n)) == n for n in range(1, 20_000))
+
+
+def queue_of(store, count: int) -> list:
+    return [
+        store.add(f"https://example.com/{n}", Article(title=f"Thing {n}")) for n in range(count)
+    ]
+
+
+def places(store, state: State | None = None) -> list[str]:
+    """Each item as "what it's called: which thing it is"."""
+    return [f"{item.ref}: {item.title[-1]}" for item in store.items(state)]
+
+
+def test_the_queue_is_numbered_from_one(store):
+    queue_of(store, 3)
+    assert places(store) == ["1: 0", "2: 1", "3: 2"]
+
+
+def test_archiving_gives_the_next_letter_and_closes_up_the_queue(store):
+    things = queue_of(store, 5)
+    archived = store.archive(things[1].id)
+    assert (archived.ref, archived.number, archived.id) == ("a", 1, things[1].id)
+    assert store.archive(things[3].id).ref == "b"
+    assert places(store) == ["1: 0", "2: 2", "3: 4", "a: 1", "b: 3"]
+    assert store.archive(things[1].id).ref == "a"  # archiving it again changes nothing
+    assert places(store) == ["1: 0", "2: 2", "3: 4", "a: 1", "b: 3"]
+
+
+def test_deleting_closes_up_whichever_list_it_was_in(store):
+    things = queue_of(store, 5)
+    for thing in things[:3]:
+        store.archive(thing.id)
+    store.delete(things[0].id)
+    assert places(store) == ["1: 3", "2: 4", "a: 1", "b: 2"]
+    store.delete(things[3].id)
+    assert places(store) == ["1: 4", "a: 1", "b: 2"]
+    store.delete(things[3].id)  # already gone: nothing happens, and nothing moves
+    assert places(store) == ["1: 4", "a: 1", "b: 2"]
+
+
+def test_requeueing_joins_the_end_of_the_queue_and_closes_up_the_archive(store):
+    things = queue_of(store, 4)
+    for thing in things[:3]:
+        store.archive(thing.id)
+    back = store.requeue(things[0].id)
+    assert (back.ref, back.state, back.archived_at) == ("2", State.QUEUED, None)
+    assert places(store) == ["1: 3", "2: 0", "a: 1", "b: 2"]
+    assert store.requeue(things[0].id).ref == "2"  # already queued: nothing changes
+
+
+def test_a_new_item_takes_the_lowest_number_free(store):
+    things = queue_of(store, 3)
+    store.delete(things[0].id)
+    store.archive(things[1].id)
+    fresh = store.add("https://example.com/fresh", Article(title="Thing 9"))
+    assert fresh.ref == "2"
+    assert fresh.id == 4  # though what the database knows it by is never reused
+    straight_in = store.add(
+        "https://example.com/read", Article(title="Thing 8"), state=State.ARCHIVED
+    )
+    assert straight_in.ref == "b"
+
+
+def test_numbers_and_letters_stay_gapless_through_anything(store):
+    things = queue_of(store, 30)
+    for step, thing in enumerate(things):
+        if step % 3 == 0:
+            store.archive(thing.id)
+        elif step % 3 == 1:
+            store.delete(thing.id)
+        if step % 7 == 0:
+            store.requeue(things[step // 2].id) if store.get(things[step // 2].id) else None
+        for state in State:
+            numbers = [item.number for item in store.items(state)]
+            assert numbers == list(range(1, len(numbers) + 1))
+
+
+def test_renumbering_leaves_the_search_index_alone(store, lesson, cafe):
+    store.delete(lesson.id)
+    moved = store.get(cafe.id)
+    assert (moved.ref, moved.id) == ("1", cafe.id)
+    assert [hit.item.ref for hit in store.search("café")] == ["1"]
+    assert store.content(cafe.id) == CAFE.content
+    assert store.db.execute("INSERT INTO items_fts (items_fts) VALUES ('integrity-check')")
+
+
+def test_resolve_by_number_and_by_letters(store, lesson, cafe):
+    store.archive(lesson.id)
+    assert store.resolve("1").id == cafe.id  # numbers are always the queue
+    assert store.resolve("a").id == store.resolve("#A").id == lesson.id  # letters, the archive
+    with pytest.raises(NotFound, match="no #2 in your queue"):
+        store.resolve("2")
+    with pytest.raises(NotFound, match="no #b in your archive"):
+        store.resolve("b")
+
+
+def test_letters_that_are_not_a_place_are_words_from_a_title(store, lesson, cafe):
+    store.archive(lesson.id)
+    assert store.resolve("bitter").id == lesson.id  # there is no archived item "bitter"
+    assert store.resolve("notes").id == cafe.id
+    endless = "z" * (LONGEST_CODE + 30)  # far too long to be anyone's place in an archive
+    with pytest.raises(NotFound, match=f'Nothing matches "{endless}"'):
+        store.resolve(endless)
+
+
+def test_a_list_from_before_things_were_numbered_is_numbered(tmp_path):
+    path = tmp_path / "really.db"
+    old = sqlite3.connect(path)
+    for script in MIGRATIONS[:2]:
+        old.executescript(script)
+    old.execute("PRAGMA user_version = 2")
+    rows = [
+        # id, state, added, archived: ids with gaps, as a list that has seen deletions has
+        (2, "queued", "2026-03-01T00:00:00+00:00", None),
+        (5, "archived", "2026-01-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"),
+        (6, "queued", "2026-02-01T00:00:00+00:00", None),
+        (9, "archived", "2026-04-01T00:00:00+00:00", "2026-05-01T00:00:00+00:00"),
+        (11, "queued", "2026-03-01T00:00:00+00:00", None),
+    ]
+    for id, state, added, archived in rows:
+        old.execute(
+            "INSERT INTO items (id, url, title, text, state, added_at, archived_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (id, f"https://example.com/{id}", f"Was {id}", f"keepsake{id}", state, added, archived),
+        )
+    old.commit()
+    old.close()
+    with Store(path) as store:
+        # The queue by when each was added, the archive by when each was archived.
+        assert [(item.ref, item.id) for item in store.items()] == [
+            ("1", 6),
+            ("2", 2),
+            ("3", 11),
+            ("a", 9),
+            ("b", 5),
+        ]
+        assert store.search("keepsake9")[0].item.ref == "a"
+        assert store.add("https://example.com/new").ref == "4"
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+    with Store(path) as store:  # and opening it again changes nothing
+        assert [item.ref for item in store.items()] == ["1", "2", "3", "4", "a", "b"]
 
 
 # ── Timing reads ──────────────────────────────────────────────────────────────
@@ -452,7 +627,7 @@ def test_a_list_from_before_reads_were_timed_is_upgraded(tmp_path):
         assert len(store.search("heirloom")) == 1
         assert store.pace() == Pace(DEFAULT_WPM, 0, 0)
         store.record(Reading(2300, 600, datetime.now(UTC)))
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with Store(path) as store:  # and opening it again changes nothing
         assert len(store.items()) == len(store.readings()) == 1
 

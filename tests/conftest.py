@@ -20,6 +20,10 @@ FORUM = "https://www.longtable.example/posts/k3Qw9xTz/on-keeping-a-commonplace-b
 # The same post, as linked from a reading sequence.
 FORUM_IN_SEQUENCE = "https://www.longtable.example/s/n945eovrA3/p/k3Qw9xTz"
 
+# A page whose query string is its address, and a link whose query string is only decoration.
+VIDEO = "https://videos.example/watch?v=abc123"
+DECORATED = f"{BLOG}?ref=newsletter&share=1"
+
 # Long enough to be worth timing.
 LONGREAD = "https://longform.example/essays/the-long-one"
 
@@ -60,7 +64,7 @@ def html(title: str, body: str, head: str = "") -> bytes:
     return document.encode()
 
 
-def essay(title: str, paragraphs: int = 40) -> bytes:
+def essay(title: str, paragraphs: int = 40, head: str = "") -> bytes:
     """A page with a couple of thousand words on it, no two paragraphs the same."""
     body = "".join(
         f"<p>Thought {n} concerns reading, and queues, and the time that both of them take. "
@@ -68,7 +72,7 @@ def essay(title: str, paragraphs: int = 40) -> bytes:
         "Nobody has ever finished a reading list, which is no reason not to keep one.</p>"
         for n in range(1, paragraphs + 1)
     )
-    return html(title, body)
+    return html(title, body, head=head)
 
 
 def pdf(text: str, title: str = "", author: str = "") -> bytes:
@@ -141,6 +145,9 @@ def web() -> Web:
     web.serve(FORUM_IN_SEQUENCE, load("forum_post.html"))
     web.redirect(EMAILED, SHARED)
     web.serve(COMMENTS, COMMENTS_VIEW)
+    web.serve(VIDEO, essay("A Talk Worth Watching"))
+    web.serve("https://videos.example/watch", html("Videos", "<p>Pick something to watch.</p>"))
+    web.serve(DECORATED, load("blog_post.html"))
     web.serve(LONGREAD, essay("The Long One"))
     for n in range(1, 8):
         web.serve(f"{LONGREAD}?part={n}", essay(f"The Long One, Part {n}"))

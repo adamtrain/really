@@ -125,6 +125,11 @@ def page_of(url: str) -> str:
     return _without(url, lambda pair: _name(pair) in POSITION_PARAMS)
 
 
+def bare(url: str) -> str:
+    """A link with nothing after its path: no query string, no anchor."""
+    return _without(url, lambda pair: True)
+
+
 def clean(url: str) -> str:
     """Normalize a URL and strip what doesn't say which page it is: the address to know it by."""
     url = _without(url, lambda pair: _is_tracking(pair) or _name(pair) in POSITION_PARAMS)

@@ -13,7 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .pace import FASTEST_WPM, NEEDED, SHORTEST_WORDS, SLOWEST_WPM, Pace, Reading, middle
-from .store import MARK, UNMARK, Hit, Item, Stats
+from .store import MARK, UNMARK, Hit, Item, State, Stats, letters
 
 MAX_WIDTH = 110
 READING_WIDTH = 88
@@ -24,6 +24,9 @@ MATCH = "#f5c451"
 STALE = "#eb9a12"
 ERROR = "#f2506e"
 FAINT = "grey42"
+
+# Beyond this many separate stretches, a renumbering is summed up, not spelt out.
+MOST_RUNS = 4
 
 # How long something can sit in the queue before its age starts to stand out.
 STALE_DAYS = 30
@@ -151,10 +154,10 @@ def listing(console: Console, items: list[Item], *, now: datetime | None = None)
 
 
 def _number(item: Item, mixed: bool) -> Text:
-    """An item's id, with a mark if it's one you've opened (or, among queued ones, archived)."""
+    """What an item is called, with a mark if you've opened it (or, among queued ones, archived)."""
     color = ARCHIVE if item.archived else ACCENT
     mark = ("◆ " if mixed else "") if item.archived else "▸ " if item.opened_at else ""
-    return Text.assemble((mark, color), (str(item.id), f"bold {color}"))
+    return Text.assemble((mark, color), (item.ref, f"bold {color}"))
 
 
 def queue_summary(console: Console, items: list[Item], *, now: datetime | None = None) -> None:
@@ -169,7 +172,7 @@ def queue_summary(console: Console, items: list[Item], *, now: datetime | None =
     parts = [plural(len(items), "thing") + " to read"]
     if minutes:
         parts.append(f"about {duration(minutes)}")
-    parts.append(f"oldest added {_when(items[0].added_at, now)}")
+    parts.append(f"oldest added {_when(min(item.added_at for item in items), now)}")
     console.print(
         Text.assemble(("◇ ", ACCENT), (parts[0], "bold"), (" · ", FAINT)).append(
             Text(" · ".join(parts[1:]), style=FAINT)
@@ -218,10 +221,55 @@ def receipt(
     *extra: str,
     style: str = ACCENT,
     mark: str = "✓",
+    was: str = "",
 ) -> None:
-    line = Text.assemble((f"{mark} ", f"bold {style}"), (f"{verb} ", ""), (f"#{item.id} ", style))
+    """Two lines saying what just happened to an item.
+
+    `was` is what it was called before, if this changed that: archiving #3 makes it #c, and
+    the headline shows both, each in the color of the list it belongs to.
+    """
+    line = Text.assemble((f"{mark} ", f"bold {style}"), (f"{verb} ", ""))
+    here = ARCHIVE if item.archived else ACCENT
+    if was:
+        there = ACCENT if item.archived else ARCHIVE
+        line.append(f"#{was}", style=f"bold {there}").append(" → ", style=FAINT)
+        line.append(f"#{item.ref} ", style=f"bold {here}")
+    else:
+        line.append(f"#{item.ref} ", style=style)
     console.print(line.append_text(_title(item)), no_wrap=True, overflow="ellipsis")
     console.print(_facts(item, *extra), no_wrap=True, overflow="ellipsis")
+
+
+def renumbered(console: Console, state: State, moves: list[tuple[int, int]]) -> None:
+    """Say what the items in a list are called now that others have left it.
+
+    `moves` pairs each changed place with its new one. Neighbours that moved together are
+    reported together: "#3 to #6 are now #2 to #5".
+    """
+    if not moves:
+        return
+    name = letters if state is State.ARCHIVED else str
+    what = "Archive relettered" if state is State.ARCHIVED else "Queue renumbered"
+
+    runs: list[list[tuple[int, int]]] = []
+    for move in sorted(moves):
+        if runs and move == (runs[-1][-1][0] + 1, runs[-1][-1][1] + 1):
+            runs[-1].append(move)
+        else:
+            runs.append([move])
+
+    def span(run: list[tuple[int, int]], side: int) -> str:
+        first, last = name(run[0][side]), name(run[-1][side])
+        return f"#{first}" if first == last else f"#{first} to #{last}"
+
+    if len(runs) > MOST_RUNS:
+        kind = "letters" if state is State.ARCHIVED else "numbers"
+        told = f"{len(moves)} others have new {kind}"
+    else:
+        told = "; ".join(
+            f"{span(run, 0)} {'is' if len(run) == 1 else 'are'} now {span(run, 1)}" for run in runs
+        )
+    console.print(Text(f"  {what}: {told}.", style=FAINT))
 
 
 def added(console: Console, item: Item, queue_size: int) -> None:
@@ -269,7 +317,7 @@ def error(
 def candidates(console: Console, items: list[Item], limit: int = 8) -> None:
     """The items an ambiguous reference could have meant."""
     for item in items[:limit]:
-        line = Text.assemble((f"  #{item.id} ", ARCHIVE if item.archived else ACCENT), item.name)
+        line = Text.assemble((f"  #{item.ref} ", ARCHIVE if item.archived else ACCENT), item.name)
         console.print(line, no_wrap=True, overflow="ellipsis")
     if len(items) > limit:
         console.print(Text(f"  …and {len(items) - limit} more", style=FAINT))
@@ -321,7 +369,7 @@ def card(item: Item, width: int, *, now: datetime | None = None) -> Panel:
         box=box.ROUNDED,
         border_style=color,
         padding=(1, 2),
-        title=Text(f"#{item.id}", style=f"bold {color}"),
+        title=Text(f"#{item.ref}", style=f"bold {color}"),
         title_align="left",
         subtitle=Text(" · ".join(history), style=FAINT),
         subtitle_align="right",
@@ -339,7 +387,7 @@ def article(console: Console, item: Item, content: str) -> None:
         console.print(Padding(Markdown(content, hyperlinks=True), (0, 2)), width=width)
     else:
         message = "No saved copy. [bold]really refresh {id}[/] fetches one."
-        console.print(Text.from_markup("  " + message.format(id=item.id), style=FAINT))
+        console.print(Text.from_markup("  " + message.format(id=item.ref), style=FAINT))
     console.print()
 
 
@@ -360,7 +408,7 @@ def hits(console: Console, results: list[Hit], query: str, *, now: datetime | No
             status = f"archived {_when(item.archived_at or item.added_at, now)}"
         else:
             status = f"in your queue, added {_when(item.added_at, now)}"
-        heading = Text.assemble((f"#{item.id} ", f"bold {color}")).append_text(
+        heading = Text.assemble((f"#{item.ref} ", f"bold {color}")).append_text(
             _marked(hit.title, "bold")
         )
         console.print(heading, width=width, no_wrap=True, overflow="ellipsis")
@@ -408,7 +456,7 @@ def stats(console: Console, numbers: Stats, path: str, *, now: datetime | None =
         queue.append(f" · {numbers.unsized} of unknown length", style=FAINT)
     grid.add_row(Text("Queue", style=ACCENT), queue)
     if oldest := numbers.oldest:
-        waiting = Text.assemble((f"#{oldest.id} ", ACCENT), oldest.name)
+        waiting = Text.assemble((f"#{oldest.ref} ", ACCENT), oldest.name)
         waiting.append(f" · added {_when(oldest.added_at, now)}", style=_age_style(oldest, now))
         grid.add_row("Oldest", waiting)
 

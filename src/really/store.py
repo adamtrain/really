@@ -22,6 +22,7 @@ FILENAME = "really.db"
 
 FIELDS = (
     "id",
+    "number",
     "url",
     "title",
     "author",
@@ -98,9 +99,28 @@ CREATE TABLE readings (
 );
 """
 
+# What you call an item by is its place in its list, kept separate from `id` so that closing
+# a gap is a matter of renumbering and never of re-indexing anyone's text. Existing items are
+# numbered in the order they joined the queue, or the archive.
+NUMBERS = """
+ALTER TABLE items ADD COLUMN number INTEGER NOT NULL DEFAULT 0;
+UPDATE items SET number = (
+    SELECT count(*) FROM items AS other
+    WHERE other.state = items.state
+      AND (coalesce(other.archived_at, other.added_at), other.id)
+       <= (coalesce(items.archived_at, items.added_at), items.id)
+);
+CREATE UNIQUE INDEX items_number ON items (state, number);
+"""
+
 # Each script takes the file from one version to the next; a new file runs them all.
-MIGRATIONS = (SCHEMA, READINGS)
+MIGRATIONS = (SCHEMA, READINGS, NUMBERS)
 SCHEMA_VERSION = len(MIGRATIONS)
+
+# The next free place in a list: one past its last.
+NEXT = "(SELECT coalesce(max(number), 0) + 1 FROM items WHERE state = :state)"
+# Letters beyond this aren't a place in anyone's archive, just a word.
+LONGEST_CODE = 6
 
 # What you can put before a colon in a search: `author:sutton`, `tag:ml`.
 SEARCH_FIELDS = {
@@ -138,9 +158,26 @@ class State(StrEnum):
     ARCHIVED = "archived"
 
 
+def letters(number: int) -> str:
+    """A number as letters, the way spreadsheets name columns: a, b, … z, aa, ab, …"""
+    code = ""
+    while number > 0:
+        number, last = divmod(number - 1, 26)
+        code = chr(ord("a") + last) + code
+    return code
+
+
+def from_letters(code: str) -> int:
+    number = 0
+    for letter in code.lower():
+        number = number * 26 + ord(letter) - ord("a") + 1
+    return number
+
+
 @dataclass(frozen=True, slots=True)
 class Item:
-    id: int
+    id: int  # permanent, and never shown: what the rest of the database knows it by
+    number: int  # its place in the queue or in the archive, which changes as others leave
     url: str
     title: str
     author: str
@@ -157,6 +194,11 @@ class Item:
     opened_at: datetime | None
     archived_at: datetime | None
     fetched_at: datetime | None
+
+    @property
+    def ref(self) -> str:
+        """What you call it: a number while it's in the queue, letters once it's archived."""
+        return letters(self.number) if self.archived else str(self.number)
 
     @property
     def name(self) -> str:
@@ -272,6 +314,7 @@ def _moment(stamp: str | None) -> datetime | None:
 def _item(row: sqlite3.Row, wpm: int) -> Item:
     return Item(
         id=row["id"],
+        number=row["number"],
         url=row["url"],
         title=row["title"],
         author=row["author"],
@@ -339,14 +382,19 @@ class Store:
         return self._load(row) if row else None
 
     def items(self, state: State | None = None, tag: str | None = None) -> list[Item]:
-        """Items in the order they joined the queue (or, for archived ones, left it)."""
+        """Items in order: the queue from 1, then the archive from a."""
         where, values = self._filters(state, tag)
         rows = self.db.execute(
-            f"SELECT {COLUMNS} FROM items WHERE 1 {where} "
-            "ORDER BY CASE state WHEN 'archived' THEN archived_at ELSE added_at END, id",
+            f"SELECT {COLUMNS} FROM items WHERE 1 {where} ORDER BY state = 'archived', number",
             values,
         )
         return [self._load(row) for row in rows]
+
+    def numbered(self, state: State, number: int) -> Item | None:
+        row = self.db.execute(
+            f"SELECT {COLUMNS} FROM items WHERE state = ? AND number = ?", (str(state), number)
+        ).fetchone()
+        return self._load(row) if row else None
 
     def count(self, state: State) -> int:
         return self.db.execute("SELECT count(*) FROM items WHERE state = ?", (state,)).fetchone()[0]
@@ -365,14 +413,22 @@ class Store:
         return self._load(row) if row else None
 
     def resolve(self, ref: str, state: State | None = None) -> Item:
-        """Find the one item meant by an id, a URL, or a few words from a title.
+        """Find the one item meant by a number, letters, a URL, or a few words from a title.
 
-        `state` narrows what words can match; an id or URL always finds its item.
+        A number is always something in the queue, and letters something in the archive.
+        `state` only narrows what words can match.
         """
         ref = ref.strip()
-        number = ref.removeprefix("#")
-        if number.isdigit():
-            return self._require(int(number))
+        name = ref.removeprefix("#").lower()
+        if name.isdigit():
+            if item := self.numbered(State.QUEUED, int(name)):
+                return item
+            raise NotFound(f"There's no #{name} in your queue.")
+        if name.isascii() and name.isalpha() and len(name) <= LONGEST_CODE:
+            if item := self.numbered(State.ARCHIVED, from_letters(name)):
+                return item
+            if len(name) <= 2:  # too short to be a title someone's searching for
+                raise NotFound(f"There's no #{name} in your archive.")
         for url in urls.find_urls(ref):
             if item := self.by_url(urls.clean(url)):
                 return item
@@ -432,7 +488,7 @@ class Store:
             queued=len(queue),
             queued_minutes=sum(item.minutes for item in queue),
             unsized=sum(1 for item in queue if not item.words),
-            oldest=queue[0] if queue else None,
+            oldest=min(queue, key=lambda item: item.added_at) if queue else None,
             archived=len(archive),
             archived_words=sum(item.words for item in archive),
             added_lately=sum(1 for item in everything if item.added_at >= since),
@@ -487,10 +543,10 @@ class Store:
         article = article or Article()
         added = added_at or _now()
         cursor = self.db.execute(
-            """
+            f"""
             INSERT INTO items (url, title, author, site, published, summary, tags, content, text,
-                               words, paywalled, state, added_at, archived_at, fetched_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               words, paywalled, state, added_at, archived_at, fetched_at, number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {NEXT.replace(":state", "?")})
             """,
             (
                 url,
@@ -508,6 +564,7 @@ class Store:
                 _stamp(added),
                 _stamp(added) if state is State.ARCHIVED else None,
                 _stamp(_now()) if fetched else None,
+                str(state),
             ),
         )
         self.db.commit()
@@ -585,11 +642,46 @@ class Store:
         return self._set(id, opened_at=_stamp(_now()))
 
     def archive(self, id: int) -> Item:
-        return self._set(id, state=str(State.ARCHIVED), archived_at=_stamp(_now()))
+        """Move an item to the archive, where it takes the next letters. The queue closes up."""
+        item = self._require(id)
+        if item.archived:
+            return item
+        return self._move(item, State.ARCHIVED, archived_at=_stamp(_now()))
 
     def requeue(self, id: int) -> Item:
-        return self._set(id, state=str(State.QUEUED), archived_at=None, opened_at=None)
+        """Move an item back to the end of the queue. The archive closes up."""
+        item = self._require(id)
+        if not item.archived:
+            return item
+        return self._move(item, State.QUEUED, archived_at=None, opened_at=None)
 
     def delete(self, id: int) -> None:
+        item = self.get(id)
+        if item is None:
+            return
         self.db.execute("DELETE FROM items WHERE id = ?", (id,))
+        self._close_up(item.state, item.number)
         self.db.commit()
+
+    def _move(self, item: Item, state: State, **columns: object) -> Item:
+        assignments = "".join(f", {column} = :{column}" for column in columns)
+        self.db.execute(
+            f"UPDATE items SET state = :state, number = {NEXT}{assignments} WHERE id = :id",
+            {"id": item.id, "state": str(state), **columns},
+        )
+        self._close_up(item.state, item.number)
+        self.db.commit()
+        return self._require(item.id)
+
+    def _close_up(self, state: State, gap: int) -> None:
+        """Move everything after a gap down by one, so a list is always 1, 2, 3… with none missing.
+
+        By way of negative numbers, in two steps. Moved one row at a time, each would land for
+        a moment on its neighbour's number, which the index on them forbids.
+        """
+        self.db.execute(
+            "UPDATE items SET number = 1 - number WHERE state = ? AND number > ?", (str(state), gap)
+        )
+        self.db.execute(
+            "UPDATE items SET number = -number WHERE state = ? AND number < 0", (str(state),)
+        )

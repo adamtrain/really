@@ -18,6 +18,7 @@ from . import urls
 from .fetch import Page
 
 SUMMARY_LENGTH = 280
+OPENING = 200  # how much of two articles' text has to match for them to be the same one
 
 # With these, a publication date only comes from the page's own metadata, never from a guess
 # based on whatever dates happen to appear in the text.
@@ -76,6 +77,18 @@ class Article:
     def words(self) -> int:
         """The length of the article proper: what reading time is based on."""
         return max(0, len(self.text.split()) - self.footnote_words)
+
+
+def same_article(one: Article, other: Article) -> bool:
+    """Whether two fetches came back with the same article.
+
+    The same title, the same opening and about the same length: a view counter may have
+    ticked over in between, but a different page, a preview or an error page won't pass.
+    """
+    if not one.text or one.title != other.title:
+        return False
+    close = abs(one.words - other.words) <= max(one.words, other.words) * 0.02
+    return close and one.text[:OPENING] == other.text[:OPENING]
 
 
 def extract(page: Page) -> Article:

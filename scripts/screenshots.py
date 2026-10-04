@@ -22,7 +22,7 @@ from really import render
 from really.extract import Article, extract
 from really.fetch import Page
 from really.pace import Reading
-from really.store import State, Store
+from really.store import Item, State, Store
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -73,6 +73,20 @@ def terminal(width: int) -> Console:
 
 def command(console: Console, line: str) -> None:
     console.print(Text.assemble((PROMPT, f"bold {render.ACCENT}"), (line, "bold")))
+
+
+def archive(console: Console, store: Store, item: Item, reading: Reading | None = None) -> None:
+    """What `really archive` prints: what the item was and is now called, and who else moved."""
+    was = item.ref
+    before = {other.id: other.number for other in store.items(State.QUEUED)}
+    item = store.archive(item.id)
+    extra = f"{item.words:,} words saved"
+    render.receipt(console, "Archived", item, extra, style=render.ARCHIVE, mark="◆", was=was)
+    if reading:
+        render.timed(console, reading, store.pace())
+    queue = store.items(State.QUEUED)
+    moves = [(before[o.id], o.number) for o in queue if before[o.id] != o.number]
+    render.renumbered(console, State.QUEUED, moves)
 
 
 def fixture(name: str, url: str) -> Article:
@@ -152,10 +166,7 @@ def search(store: Store) -> Console:
     store.mark_opened(item.id)
     command(console, 'really archive --note "The lighthouse problem" --tag reading')
     store.edit(item.id, note="The lighthouse problem")
-    store.set_tags(item.id, ["reading"])
-    item = store.archive(item.id)
-    extra = f"{item.words:,} words saved"
-    render.receipt(console, "Archived", item, extra, style=render.ARCHIVE, mark="◆")
+    archive(console, store, store.set_tags(item.id, ["reading"]))
     console.print()
     command(console, "really search weekly decide")
     render.hits(console, store.search("weekly decide"), "weekly decide", now=NOW)
@@ -177,10 +188,7 @@ def pace(store: Store) -> Console:
     reading = Reading(item.words, 29 * 60, NOW)
     store.record(reading)
     command(console, "really archive")
-    item = store.archive(item.id)
-    extra = f"{item.words:,} words saved"
-    render.receipt(console, "Archived", item, extra, style=render.ARCHIVE, mark="◆")
-    render.timed(console, reading, store.pace())
+    archive(console, store, item, reading)
     console.print()
     command(console, "really pace")
     render.pace(console, store.pace(), store.readings(), now=NOW)

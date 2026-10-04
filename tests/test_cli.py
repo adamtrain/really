@@ -13,12 +13,15 @@ from really.store import ENV_DB, State, Store
 from .conftest import (
     BLOG,
     COMMENTS,
+    DECORATED,
     EMAILED,
     FORUM,
     FORUM_IN_SEQUENCE,
     LONGREAD,
     PAYWALLED,
     POST,
+    VIDEO,
+    essay,
 )
 
 runner = CliRunner()
@@ -166,6 +169,42 @@ def test_a_forum_post_is_one_item_however_it_was_linked(home, web):
     assert "Already have #1" in ok("add", FORUM_IN_SEQUENCE)
     assert "Already have #1" in ok("add", FORUM)
     assert [item.url for item in items(home)] == [FORUM]
+
+
+def test_a_query_string_that_is_only_decoration_is_dropped(home, web):
+    ok("add", f"{DECORATED}#fn2")
+    assert [item.url for item in items(home)] == [BLOG]
+    assert web.requests == [DECORATED, BLOG]  # tried without it, and found the same article
+    assert "Already have #1" in ok("add", DECORATED)
+    assert "Already have #1" in ok("add", BLOG)
+
+
+def test_a_query_string_that_is_the_address_is_kept(home, web):
+    ok("add", VIDEO)
+    assert [item.url for item in items(home)] == [VIDEO]  # without ?v= it's another page
+
+
+def test_a_query_string_is_kept_if_there_is_nothing_at_the_address_without_it(home, web):
+    post = "https://old.example/index.php?p=42"
+    web.serve(post, essay("Post Forty-Two"))
+    ok("add", post)
+    assert [item.url for item in items(home)] == [post]
+
+
+def test_a_page_that_gives_its_own_address_is_taken_at_its_word(home, web):
+    shared = "https://videos.example/watch?v=xyz789&t=42&feature=share"
+    declared = '<link rel="canonical" href="https://videos.example/watch?v=xyz789">'
+    web.serve(shared, essay("Another Talk", head=declared))
+    ok("add", shared)
+    assert [item.url for item in items(home)] == ["https://videos.example/watch?v=xyz789"]
+    assert web.requests == [shared]  # no need to go and check
+
+
+def test_refresh_tidies_an_address_saved_without_fetching(home, web):
+    ok("add", "--offline", DECORATED)
+    assert items(home)[0].url == DECORATED
+    ok("refresh")
+    assert items(home)[0].url == BLOG
 
 
 def test_a_duplicate_is_spotted_before_fetching(home, web):
@@ -354,8 +393,9 @@ def test_archive_what_was_just_read(home, browser):
     ok("add", BLOG, POST)
     ok("next")
     output = ok("archive", "--note", "The weekly pass", "-t", "habits")
-    assert "Archived #1 Tidy Queues, Tidy Mind" in output
+    assert "Archived #1 → #a Tidy Queues, Tidy Mind" in output
     assert "words saved" in output
+    assert "Queue renumbered: #2 is now #1." in output
     [kept] = items(home, State.ARCHIVED)
     assert (kept.note, kept.tags) == ("The weekly pass", ("habits",))
     assert [item.id for item in items(home, State.QUEUED)] == [2]
@@ -371,7 +411,8 @@ def test_archive_with_nothing_opened_asks_which():
 def test_archive_fetches_a_copy_if_there_is_none(home, web):
     ok("add", "--offline", BLOG)
     output = ok("archive", "1")
-    assert "Archived #1 Tidy Queues, Tidy Mind" in output
+    assert "Archived #1 → #a Tidy Queues, Tidy Mind" in output
+    assert "renumbered" not in output  # it was the only thing in the queue
     [kept] = items(home, State.ARCHIVED)
     assert kept.words > 100 and kept.author == "Sam Okafor"
 
@@ -389,14 +430,14 @@ def test_archive_warns_about_a_paywalled_preview():
     ok("add", PAYWALLED)
     output = ok("archive", "1")
     assert "only the free preview" in output
-    assert "really paste 1" in output
+    assert "really paste a" in output  # what it's called now
 
 
 def test_archive_again_updates_the_note(home):
     ok("add", BLOG)
     ok("archive", "1")
-    assert "Already archived" in ok("archive", "1")
-    assert "Updated" in ok("archive", "1", "--note", "Second thoughts")
+    assert "Already archived #a" in ok("archive", "a")
+    assert "Updated #a" in ok("archive", "a", "--note", "Second thoughts")
     assert items(home)[0].note == "Second thoughts"
 
 
@@ -418,25 +459,136 @@ def test_delete_several_by_id(home):
 def test_deleting_from_the_archive_asks_first(home):
     ok("add", BLOG)
     ok("archive", "1")
-    assert "Deleted" not in ok("delete", "1", input="n\n")
+    assert "Deleted" not in ok("delete", "a", input="n\n")
     assert len(items(home)) == 1
-    assert "Deleted" in ok("delete", "1", input="y\n")
+    assert "Deleted #a" in ok("delete", "a", input="y\n")
     assert items(home) == []
 
 
 def test_delete_yes_skips_the_question(home):
     ok("add", BLOG)
     ok("archive", "1")
-    ok("delete", "--yes", "1")
+    ok("delete", "--yes", "a")
     assert items(home) == []
 
 
 def test_requeue(home):
     ok("add", BLOG)
     ok("archive", "1")
-    assert "Back in your queue" in ok("requeue", "tidy")
+    assert "Requeued #a → #1 Tidy Queues, Tidy Mind" in ok("requeue", "tidy")
     assert items(home)[0].state is State.QUEUED
     assert run("requeue", "1").exit_code == 1
+
+
+# ── What things are called ────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def five(home):
+    """A queue of five: the long read's parts 1 to 5, numbered 1 to 5."""
+    ok("add", *[f"{LONGREAD}?part={n}" for n in range(1, 6)])
+    return home
+
+
+def called(home, state: State | None = None) -> list[str]:
+    """Each item as "what it's called: which part it is"."""
+    return [f"{item.ref}: {item.title[-1]}" for item in items(home, state)]
+
+
+def test_the_queue_is_numbered_and_the_archive_lettered(five):
+    ok("archive", "2")
+    ok("archive", "3")  # what was 4 until a moment ago
+    assert called(five) == ["1: 1", "2: 3", "3: 5", "a: 2", "b: 4"]
+    listing = ok("list", "--all")
+    assert [line.split()[:2] for line in listing.splitlines() if "The Long One" in line] == [
+        ["1", "The"],
+        ["2", "The"],
+        ["3", "The"],
+        ["◆", "a"],
+        ["◆", "b"],
+    ]
+
+
+def test_archiving_says_what_it_is_called_now_and_what_moved(five):
+    output = ok("archive", "2")
+    assert "Archived #2 → #a The Long One, Part 2" in output
+    assert "Queue renumbered: #3 to #5 are now #2 to #4." in output
+    output = ok("archive", "4")
+    assert "Archived #4 → #b The Long One, Part 5" in output
+    assert "renumbered" not in output  # the last in the queue: nothing was behind it
+
+
+def test_a_new_link_takes_the_lowest_free_number(five):
+    ok("delete", "1", "2")
+    assert "Added #4 Tidy Queues, Tidy Mind" in ok("add", BLOG)
+    assert called(five) == ["1: 3", "2: 4", "3: 5", "4: d"]
+
+
+def test_deleting_several_goes_by_the_numbers_you_gave(five):
+    output = ok("delete", "2", "4", "2")
+    assert "Deleted #2 The Long One, Part 2" in output
+    assert "Deleted #4 The Long One, Part 4" in output  # not "#3", as it briefly was
+    assert output.count("Deleted") == 2
+    assert output.count("Queue renumbered") == 1
+    assert "Queue renumbered: #3 is now #2; #5 is now #3." in output
+    assert called(five) == ["1: 1", "2: 3", "3: 5"]
+
+
+def test_requeueing_says_what_it_is_called_now_and_what_moved(five):
+    for _ in range(3):
+        ok("archive", "1")
+    output = ok("requeue", "a")
+    assert "Requeued #a → #3 The Long One, Part 1" in output
+    assert "Archive relettered: #b to #c are now #a to #b." in output
+    assert called(five) == ["1: 4", "2: 5", "3: 1", "a: 2", "b: 3"]
+
+
+def test_deleting_from_the_archive_closes_it_up(five):
+    for _ in range(3):
+        ok("archive", "1")
+    output = ok("delete", "--yes", "B")
+    assert "Deleted #b The Long One, Part 2" in output
+    assert "Archive relettered: #c is now #b." in output
+    assert called(five, State.ARCHIVED) == ["a: 1", "b: 3"]
+
+
+def test_letters_work_wherever_a_number_does(five, browser):
+    ok("archive", "5", "--note", "The last part")
+    assert "The last part" in ok("edit", "a", "--author", "A. Writer")
+    assert "#later" in ok("tag", "#a", "later")
+    ok("open", "a")
+    assert browser == [f"{LONGREAD}?part=5"]
+    assert json.loads(ok("show", "a", "--json"))["ref"] == "a"
+    assert [entry["ref"] for entry in json.loads(ok("list", "--all", "--json"))] == [
+        "1",
+        "2",
+        "3",
+        "4",
+        "a",
+    ]
+
+
+def test_a_number_or_letters_that_nothing_has(five):
+    ok("archive", "1")
+    for ref, where in [
+        ("9", "#9 in your queue"),
+        ("b", "#b in your archive"),
+        ("zz", "#zz in your"),
+    ]:
+        result = run("show", ref)
+        assert result.exit_code == 1
+        assert f"There's no {where}" in result.output
+
+
+def test_review_shows_each_item_under_its_current_number(five):
+    output = ok("review", input="a\nd\ns\nq\n")
+    assert "Archived #1 → #a The Long One, Part 1" in output
+    assert "Queue renumbered: #2 to #5 are now #1 to #4." in output
+    assert "Deleted #1 The Long One, Part 2" in output
+    assert "Queue renumbered: #2 to #4 are now #1 to #3." in output
+    assert output.count("─ #1 ─") == 3  # three different items, each at the top in its turn
+    assert "─ #2 ─" in output  # the one after the one that was skipped
+    assert called(five) == ["1: 3", "2: 4", "3: 5", "a: 1"]
 
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -444,7 +596,7 @@ def test_requeue(home):
 
 def length(home, id: int = 1) -> int:
     with Store(home) as store:
-        words = store.resolve(str(id)).words
+        words = store._require(id).words
     assert 1600 <= words < 2100  # what the timings in these tests assume of the long read
     return words
 
@@ -485,12 +637,12 @@ def test_archiving_something_you_never_opened_is_not_timed(home, clock):
 
 
 def read_five(clock, then: str) -> str:
-    """Read parts 1 to 5: three in five minutes each, one slowly, one fast."""
+    """Read the first five in the queue: three in five minutes each, one slowly, one fast."""
     last = ""
-    for n, minutes in enumerate([5, 5, 20, 5, 3.5], 1):
-        ok("open", str(n))
+    for minutes in [5, 5, 20, 5, 3.5]:
+        ok("next")
         clock.advance(minutes=minutes)
-        last = ok(then, str(n))
+        last = ok(then)
     return last
 
 
@@ -539,7 +691,7 @@ def test_search_the_full_text():
     ok("add", BLOG, POST)
     ok("archive", "2")
     output = ok("search", "lighthouse")
-    assert "#2 The Slow Web Is Still Here" in output
+    assert "#a The Slow Web Is Still Here" in output
     assert "Ada Quill · Margin Notes · archived just now" in output
     assert "the lighthouse problem" in output
     assert "1 match for lighthouse" in output
@@ -548,10 +700,10 @@ def test_search_the_full_text():
 def test_search_covers_notes_and_can_be_limited_to_the_archive():
     ok("add", BLOG, POST)
     ok("archive", "1", "--note", "Thursday ritual")
-    assert "#1 Tidy Queues" in ok("search", "ritual")
+    assert "#a Tidy Queues" in ok("search", "ritual")
     assert "Nothing matches" in ok("search", "--queue", "ritual")
-    assert "#1 Tidy Queues" in ok("search", "--archive", "author:okafor", "promise")
-    assert "#2" in ok("search", "-q", "reading")
+    assert "#a Tidy Queues" in ok("search", "--archive", "author:okafor", "promise")
+    assert "#1 The Slow Web" in ok("search", "-q", "reading")  # it has moved up to 1
 
 
 def test_search_json_and_limit():
@@ -642,7 +794,7 @@ def test_refresh_all_fetches_everything_again(home, web):
     ok("archive", "2")
     before = len(web.requests)
     output = ok("refresh", "--all")
-    assert "Fetched #1" in output and "Fetched #2" in output
+    assert "Fetched #1" in output and "Fetched #a" in output
     assert len(web.requests) == before + 2
     assert run("refresh", "--all", "1").exit_code == 1  # one or the other
 
@@ -709,7 +861,7 @@ def test_import_safari(home, bookmarks):
     assert "Imported 1 link from Safari's Reading List" in output
     assert "1 skipped" in output and "1 already here" in output
     assert "--read archive" in output and "really refresh" in output
-    unread = items(home)[0]  # it keeps the date Safari had, so it sorts first
+    unread = items(home)[-1]  # it keeps the date Safari had, but joins the end of the queue
     assert (unread.title, unread.summary) == ("Unread", "About Unread.")
     assert unread.added_at.date().isoformat() == "2026-01-02"
 
