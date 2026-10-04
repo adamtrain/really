@@ -10,7 +10,16 @@ from really import cli
 from really.clipboard import ClipboardError
 from really.store import ENV_DB, State, Store
 
-from .conftest import BLOG, COMMENTS, EMAILED, LONGREAD, PAYWALLED, POST
+from .conftest import (
+    BLOG,
+    COMMENTS,
+    EMAILED,
+    FORUM,
+    FORUM_IN_SEQUENCE,
+    LONGREAD,
+    PAYWALLED,
+    POST,
+)
 
 runner = CliRunner()
 
@@ -33,7 +42,9 @@ def home(monkeypatch, tmp_path, web):
     """Every test gets its own reading list and the pretend internet."""
     path = tmp_path / "really.db"
     monkeypatch.setenv(ENV_DB, str(path))
-    monkeypatch.setenv("COLUMNS", "120")
+    # Set here and not through $COLUMNS, which a console only reads when it's created.
+    for console in (cli.out, cli.err):
+        monkeypatch.setattr(console, "width", 120)
     monkeypatch.setattr(cli, "new_client", web.client)
     return path
 
@@ -145,6 +156,16 @@ def test_the_same_post_by_another_route_is_a_duplicate(home, clipboard):
     output = ok("add", EMAILED)
     assert "Already have #1 The Slow Web Is Still Here" in output
     assert len(items(home)) == 1
+
+
+def test_a_forum_post_is_one_item_however_it_was_linked(home, web):
+    output = ok("add", f"{FORUM}?commentId=x9Yz")  # a link to one comment under it
+    assert "Added #1 On Keeping a Commonplace Book" in output
+    assert "wren_h · The Long Table" in output
+    assert web.requests == [FORUM]  # fetched as the post, not as the comment's view of it
+    assert "Already have #1" in ok("add", FORUM_IN_SEQUENCE)
+    assert "Already have #1" in ok("add", FORUM)
+    assert [item.url for item in items(home)] == [FORUM]
 
 
 def test_a_duplicate_is_spotted_before_fetching(home, web):

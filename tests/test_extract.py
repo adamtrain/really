@@ -4,7 +4,7 @@ import sys
 from really.extract import extract
 from really.fetch import Page
 
-from .conftest import BLOG, LANDED, PAYWALLED, POST, html, page, pdf
+from .conftest import BLOG, FORUM, FORUM_IN_SEQUENCE, LANDED, PAYWALLED, POST, html, page, pdf
 
 
 def test_substack_post():
@@ -84,6 +84,17 @@ def test_canonical_drops_what_a_newsletter_link_picks_up():
     assert article.canonical == POST
 
 
+def test_a_canonical_that_is_a_fuller_address_for_the_same_thing_is_believed():
+    """The post's id is in both, whether it was linked from a sequence or without its slug."""
+    assert extract(page("forum_post.html", FORUM_IN_SEQUENCE)).canonical == FORUM
+    assert extract(page("forum_post.html", FORUM.rsplit("/", 1)[0])).canonical == FORUM
+    assert (
+        extract(page("forum_post.html", "https://www.longtable.example/tag/reading")).canonical
+        == ""
+    )
+    assert extract(page("forum_post.html", FORUM.replace("www.", "mirror."))).canonical == ""
+
+
 def test_a_canonical_pointing_elsewhere_is_ignored():
     """The blog fixture declares its homepage as canonical, as misconfigured sites do."""
     assert extract(page("blog_post.html", BLOG)).canonical == ""
@@ -107,6 +118,129 @@ def test_blog_post():
     assert article.published == "2025-11-02"
     assert article.summary.startswith("A queue is a promise")
     assert article.summary.endswith("…")
+
+
+# ── A page streamed in pieces, as LessWrong and the Alignment Forum send theirs ──
+
+
+def test_a_streamed_forum_post():
+    article = extract(page("forum_post.html", FORUM))
+    assert article.title == "On Keeping a Commonplace Book"  # not "480", its score
+    assert article.author == "wren_h"
+    assert article.site == "The Long Table"
+    assert article.summary.startswith("Why copying out other people's sentences by hand")
+    assert article.canonical == FORUM
+
+
+def test_a_post_wrapped_in_something_named_for_comments_is_still_the_post():
+    """The forum wraps each post in "commentOnSelection", for commenting on a highlight."""
+    article = extract(page("forum_post.html", FORUM))
+    assert article.text.startswith("For eleven years I have copied sentences")
+    assert "it arrives whenever you open it." in article.text
+    assert "## What goes in" in article.content
+    assert 200 < article.words < 225  # the post is 211 words, its footnote 37 more
+
+
+def test_the_forum_s_comments_and_chrome_are_left_out():
+    article = extract(page("forum_post.html", FORUM))
+    for stray in (
+        "Strong disagree",
+        "going to steal",
+        "corvid",
+        "56 comments",
+        "requires javascript",
+    ):
+        assert stray not in article.text
+        assert stray not in article.content
+
+
+def test_the_forum_post_s_footnote_is_kept_but_not_counted():
+    article = extract(page("forum_post.html", FORUM))
+    assert "a quarry" in article.text
+    assert 30 < article.footnote_words < 50
+
+
+def test_the_date_is_the_post_s_not_one_from_a_script_or_a_comment():
+    """The page's settings mention 2031 and 2030, and a comment is dated before the post."""
+    assert extract(page("forum_post.html", FORUM)).published == "2025-06-05"
+
+
+# ── Where a date may come from ────────────────────────────────────────────────
+
+
+def dated(head: str = "", body: str = "") -> str:
+    document = html("Dated", body, head=head)
+    return extract(Page("https://example.com/dated", "text/html", document)).published
+
+
+def test_a_date_stated_in_the_metadata():
+    assert dated('<meta property="article:published_time" content="2025-11-02T08:00:00Z">') == (
+        "2025-11-02"
+    )
+    assert dated('<meta name="citation_date" content="2017/06/12">') == "2017-06-12"
+    structured = '{"@type": "Article", "datePublished": "2026-03-14T09:30:00+00:00"}'
+    assert dated(f'<script type="application/ld+json">{structured}</script>') == "2026-03-14"
+
+
+def test_a_date_stated_in_a_time_element():
+    assert dated(body='<p>Posted <time datetime="2024-05-06T07:08:09Z">last May</time></p>') == (
+        "2024-05-06"
+    )
+
+
+def test_a_comment_s_date_is_not_the_article_s():
+    comment = '<div class="comment-list"><time datetime="2024-05-06">May 6</time> Nice post.</div>'
+    assert dated(body=comment) == ""
+    post = '<p>Posted <time datetime="2024-05-01">May 1</time></p>'
+    assert dated(body=comment + post) == "2024-05-01"
+
+
+def test_a_date_lying_around_in_a_script_is_not_a_publication_date():
+    assert (
+        dated(body='<script>window.settings = {"reviewEnds": "2031-02-01T08:00:00Z"}</script>')
+        == ""
+    )
+
+
+# ── Other things pages get up to ──────────────────────────────────────────────
+
+
+def test_metadata_left_in_the_body_is_still_read():
+    tags = (
+        '<meta property="og:title" content="The Real Title">'
+        '<meta name="description" content="What it is about.">'
+    )
+    body = (
+        html("404", tags)
+        .replace(b"<title>404</title>", b"")
+        .replace(b"<h1>404</h1>", b"<h1>9</h1>")
+    )
+    article = extract(Page("https://example.com/streamed", "text/html", body))
+    assert article.title == "The Real Title"
+    assert article.summary == "What it is about."
+
+
+def test_a_declared_article_body_is_believed():
+    post = '<div itemprop="articleBody"><div class="comment-toolbar-wrap">'
+    post += (
+        "<p>" + "This is the article, whatever its wrapper is called. " * 40 + "</p></div></div>"
+    )
+    article = extract(Page("https://example.com/wrapped", "text/html", html("Wrapped", post)))
+    assert article.text.count("This is the article") == 40
+
+
+def test_a_site_named_only_in_its_titles():
+    head = '<meta property="og:title" content="On Corrigibility — AI Alignment Forum">'
+    document = html("On Corrigibility", "", head=head)
+    article = extract(Page("https://www.alignmentforum.example/posts/1", "text/html", document))
+    assert (article.title, article.site) == ("On Corrigibility", "AI Alignment Forum")
+
+
+def test_a_title_s_last_part_is_only_dropped_if_it_names_the_site():
+    head = '<meta property="og:title" content="Rust — A Review">'
+    document = html("Rust — A Review", "", head=head)
+    article = extract(Page("https://blog.example.com/rust", "text/html", document))
+    assert (article.title, article.site) == ("Rust — A Review", "blog.example.com")
 
 
 def test_a_twitter_handle_is_not_a_site_name():

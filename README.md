@@ -253,13 +253,23 @@ place.
 Pages are fetched with [httpx](https://www.python-httpx.org). Besides ordinary redirects, really
 follows the small forwarding pages that newsletter platforms use in place of one, and it won't
 mistake a login wall it got bounced to for the article. A page's own `<link rel="canonical">` is
-trusted only when it names the same page without the query string, because that is exactly what
-strips a newsletter's tracking and because sites get canonical links wrong in every other way.
+what strips a newsletter's tracking, and what makes one post reached three ways a single item.
+But sites get canonical links wrong too, so one is only believed if it's on the same site and
+has the same path, or still contains the last part of the path that was fetched.
 
 [trafilatura](https://trafilatura.readthedocs.io) finds the article in the page. really keeps two
 copies: Markdown with the links intact, which is what you read and export, and plain text, which
-is what gets searched. PDFs are read with [pypdf](https://pypdf.readthedocs.io). Publication
-dates are only taken from a page's metadata, never guessed from dates that appear in the text.
+is what gets searched. PDFs are read with [pypdf](https://pypdf.readthedocs.io).
+
+Some pages have to be put right before they can be read. Sites that stream a page in pieces, as
+LessWrong, the Alignment Forum and the EA Forum do, leave their title and metadata in the body,
+so really moves them to the head, where a browser would. Those forums also wrap each post in an
+element named for comments, which an extractor would discard along with the post; so where a
+page marks its own article (with `instapaper_body`, or schema.org's `articleBody`), that mark is
+believed over a name. A link to a single comment is treated as a link to the post it's under.
+
+A publication date comes from the page's metadata, its address or its dateline. Scripts and
+comment sections are kept out of that search, since they are where a wrong date comes from.
 
 The copy is saved when you add a link, not when you archive it. That's where the reading time
 comes from, and it means archiving works offline and survives the page being taken down in the

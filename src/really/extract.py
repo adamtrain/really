@@ -10,6 +10,7 @@ import io
 import logging
 import re
 import warnings
+from copy import deepcopy
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -29,6 +30,17 @@ FOOTNOTES = (
     'contains(concat(" ", normalize-space(@class), " "), " footnote ")'
     ' or contains(concat(" ", normalize-space(@class), " "), " footnotes ")'
     ' or @role="doc-endnotes"]'
+)
+
+# How a page says "this part is the article": the read-later tools' convention, and schema.org's.
+DECLARED_BODY = (
+    '//*[contains(concat(" ", normalize-space(@class), " "), " instapaper_body ")'
+    ' or @itemprop="articleBody"]'
+)
+# A part of the page that's named for comments.
+_COMMENTS = (
+    "not(self::html or self::body) and contains("
+    'translate(concat(@class, " ", @id), "COMENT", "coment"), "comment")'
 )
 
 # Sites written by everyone and so by no one. Their "author" is always a false positive.
@@ -102,6 +114,7 @@ def _excerpt(text: str, length: int = SUMMARY_LENGTH) -> str:
 
 
 def _from_html(page: Page) -> Article:
+    from lxml.html import tostring
     from trafilatura import bare_extraction, extract_metadata, load_html
     from trafilatura import extract as extract_text
     from trafilatura.settings import Document
@@ -111,6 +124,8 @@ def _from_html(page: Page) -> Article:
     tree = load_html(source)
     if tree is None:
         return Article()
+    if _repair(tree):
+        source = tostring(tree, encoding="unicode")
 
     doc = bare_extraction(
         source,
@@ -134,7 +149,9 @@ def _from_html(page: Page) -> Article:
 
     host = urls.host(page.url)
     site = _site(tree, doc.sitename, host)
-    title = _tidy_title(_squash(doc.title), site, host)
+    title, named = _tidy_title(_squash(doc.title), site, host)
+    if named and site == host:  # the title's "— LessWrong" is the only place the site is named
+        site = named
     description = _squash(doc.description)
     # Shown as the title and summary already, so not wanted again as the copy's first lines.
     for repeated in (title, description):
@@ -143,7 +160,7 @@ def _from_html(page: Page) -> Article:
         title=title,
         author=_authors(tree, doc.author, host),
         site=site,
-        published=doc.date or "",
+        published=_published(tree, page.url),
         summary=description if re.search(r"\w", description) else _excerpt(text),
         content=content,
         text=text,
@@ -151,6 +168,69 @@ def _from_html(page: Page) -> Article:
         paywalled=bool(_PAYWALLED.search(page.body)),
         footnote_words=footnote_words,
     )
+
+
+def _repair(tree) -> bool:
+    """Undo two things pages do that mislead the extractor. True if there was anything to undo.
+
+    A page streamed in pieces, as React apps like LessWrong's are, leaves its <title> and <meta>
+    tags in the body. A browser moves them up into the head; the extractor only looks there.
+
+    And the extractor throws away anything named for comments, which is nearly always right.
+    But where a page marks its article, the mark outranks a name: LessWrong wraps each post in
+    "commentOnSelection", for commenting on a highlight, and the whole post went with it.
+    """
+    changed = False
+    head = tree.find("head")
+    if head is not None:
+        misplaced = tree.xpath("//body//meta[@name or @property] | //body//link[@rel='canonical']")
+        if head.find("title") is None:
+            misplaced += tree.xpath("//body//title[not(ancestor::svg)]")[:1]
+        for tag in misplaced:
+            _detach(tag)
+            head.append(tag)
+            changed = True
+    for body in tree.xpath(DECLARED_BODY):
+        for element in (*body.iter("*"), *body.iterancestors()):
+            for attribute in ("class", "id"):
+                if "comment" in (element.get(attribute) or "").lower():
+                    del element.attrib[attribute]
+                    changed = True
+    return changed
+
+
+def _detach(element) -> None:
+    """Take an element out of the tree, leaving behind the text that follows it."""
+    parent, before = element.getparent(), element.getprevious()
+    if element.tail and before is not None:
+        before.tail = (before.tail or "") + element.tail
+    elif element.tail:
+        parent.text = (parent.text or "") + element.tail
+    element.tail = None
+    parent.remove(element)
+
+
+def _published(tree, url: str) -> str:
+    """The publication date, as far as the page states one.
+
+    The date library reads a page's metadata, its address and its dateline well. But with none
+    of those to go on it keeps looking, and comes back with a timestamp out of a script
+    (LessWrong's settings hold several) or the date on a reader's comment. So it's shown the
+    page without its scripts, other than structured data, and without its comments.
+    """
+    from htmldate import find_date
+
+    page = deepcopy(tree)
+    for stray in page.xpath(f"//script[not(@type='application/ld+json')] | //*[{_COMMENTS}]"):
+        if stray.getparent() is not None:
+            _detach(stray)
+    found = find_date(
+        page,
+        url=url,
+        extensive_search=DATES["extensive_search"],
+        original_date=DATES["original_date"],
+    )
+    return found or ""
 
 
 def _without_heading(body: str, heading: str) -> str:
@@ -175,15 +255,18 @@ def _site(tree, guess: str | None, host: str) -> str:
     return name
 
 
-def _tidy_title(title: str, site: str, host: str) -> str:
-    """Drop a trailing " - Site Name" from a title."""
+def _tidy_title(title: str, site: str, host: str) -> tuple[str, str]:
+    """Split a trailing " - Site Name" off a title. Returns the title, and that name if any."""
     pieces = _TITLE_SEPARATOR.split(title)
     if len(pieces) < 2:
-        return title
-    labels = {_key(site), _key(host), *(_key(label) for label in host.split("."))}
-    if _key(pieces[-1]) in labels - {""}:
-        return title[: title.rindex(pieces[-1])].rstrip(" " + _SEPARATORS)
-    return title
+        return title, ""
+    last = _key(pieces[-1])
+    names = {_key(site), _key(host), *(_key(label) for label in host.split(".")[:-1])} - {""}
+    # The name and the address needn't match exactly: "AI Alignment Forum", alignmentforum.org.
+    alike = len(last) > 3 and any(len(n) > 3 and (n in last or last in n) for n in names)
+    if last in names or alike:
+        return title[: title.rindex(pieces[-1])].rstrip(" " + _SEPARATORS), pieces[-1].strip()
+    return title, ""
 
 
 def _authors(tree, guess: str | None, host: str) -> str:
@@ -199,21 +282,24 @@ def _authors(tree, guess: str | None, host: str) -> str:
 
 
 def _canonical(tree, fetched: str) -> str:
-    """The page's <link rel=canonical>, when it's this same page minus the query string.
+    """The page's <link rel=canonical>, when it's believably another address for this page.
 
     Canonical links are how the junk on a newsletter link (?publication_id=…&r=…) gets
-    dropped, but sites also get them wrong, so one that points somewhere else is ignored.
+    dropped, and how one post reached three ways turns out to be one post. But sites also get
+    them wrong, pointing every page at the home page, say. So one is believed only if it's on
+    the same site and either has the same path, or still has in it the last piece of the path
+    we fetched: /posts/HBxe6wdj and /s/sequence/p/HBxe6wdj are both, canonically,
+    /posts/HBxe6wdj/what-failure-looks-like.
     """
     for href in tree.xpath('//link[@rel="canonical"]/@href'):
         try:
             ours, theirs = urlsplit(fetched), urlsplit(href.strip())
         except ValueError:
             continue
-        if (theirs.scheme, theirs.hostname, theirs.path) == (
-            ours.scheme,
-            ours.hostname,
-            ours.path,
-        ):
+        if (theirs.scheme, theirs.hostname) != (ours.scheme, ours.hostname):
+            continue
+        last = ours.path.rstrip("/").rpartition("/")[2]
+        if theirs.path == ours.path or (len(last) >= 8 and last in theirs.path.split("/")):
             return href.strip()
     return ""
 

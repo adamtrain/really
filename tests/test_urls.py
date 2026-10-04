@@ -60,6 +60,14 @@ def test_clean(given, cleaned):
     assert urls.clean(given) == cleaned
 
 
+def test_a_link_to_one_comment_is_a_link_to_its_page():
+    link = "https://forum.example/posts/abc/a-post?commentId=x9Yz&page=2&utm_source=share#top"
+    assert urls.clean(link) == "https://forum.example/posts/abc/a-post?page=2"
+    # For fetching, only what points at a place on the page goes; a redirector may want the rest.
+    assert urls.page_of(link) == "https://forum.example/posts/abc/a-post?page=2&utm_source=share"
+    assert urls.page_of("https://example.com/a?b=1") == "https://example.com/a?b=1"
+
+
 def test_clean_is_idempotent():
     once = urls.clean("https://example.com/a?b=1&utm_source=x#top")
     assert urls.clean(once) == once

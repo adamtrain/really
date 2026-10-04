@@ -14,6 +14,12 @@ POST = "https://www.marginnotes.example/p/the-slow-web-is-still-here"
 PAYWALLED = "https://www.marginnotes.example/p/what-the-archive-is-for"
 BLOG = "https://fieldnotes.example/posts/tidy-queues"
 
+# A forum that streams its pages the way LessWrong and the Alignment Forum do.
+FORUM = "https://www.longtable.example/posts/k3Qw9xTz/on-keeping-a-commonplace-book"
+
+# The same post, as linked from a reading sequence.
+FORUM_IN_SEQUENCE = "https://www.longtable.example/s/n945eovrA3/p/k3Qw9xTz"
+
 # Long enough to be worth timing.
 LONGREAD = "https://longform.example/essays/the-long-one"
 
@@ -131,6 +137,8 @@ def web() -> Web:
     web.serve(LANDED, load("substack_post.html"))
     web.serve(PAYWALLED, load("substack_paywalled.html"))
     web.serve(BLOG, load("blog_post.html"))
+    web.serve(FORUM, load("forum_post.html"))
+    web.serve(FORUM_IN_SEQUENCE, load("forum_post.html"))
     web.redirect(EMAILED, SHARED)
     web.serve(COMMENTS, COMMENTS_VIEW)
     web.serve(LONGREAD, essay("The Long One"))

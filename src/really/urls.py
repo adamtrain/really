@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 _URL = re.compile(r"https?://[^\s<>\"'`]+", re.IGNORECASE)
@@ -11,6 +12,10 @@ _CLOSERS = {")": "(", "]": "[", "}": "{"}
 _SIGN_IN = re.compile(
     r"(^|[/.])(log-?in|sign-?in|sign_in|authwall|servicelogin|sso|oauth2?)([/.]|$)", re.IGNORECASE
 )
+
+# Query parameters that aim a link at a spot on a page, as a fragment does. Forums such as
+# LessWrong link to a single comment this way, and serve that view with the site's own title.
+POSITION_PARAMS = frozenset({"commentid"})
 
 # Query parameters that say how you reached a page, not which page it is.
 TRACKING_PREFIXES = ("utm_", "pk_", "mtm_", "hsa_")
@@ -88,33 +93,54 @@ def find_urls(text: str) -> list[str]:
     return list(found)
 
 
+def _name(pair: str) -> str:
+    return unquote(pair.split("=", 1)[0]).lower()
+
+
 def _is_tracking(pair: str) -> bool:
-    name = unquote(pair.split("=", 1)[0]).lower()
-    return name in TRACKING_PARAMS or name.startswith(TRACKING_PREFIXES)
+    return _name(pair) in TRACKING_PARAMS or _name(pair).startswith(TRACKING_PREFIXES)
 
 
-def clean(url: str) -> str:
-    """Normalize a URL and strip its tracking parameters.
+def _without(url: str, unwanted: Callable[[str], bool]) -> str:
+    """A URL minus its fragment and the query parameters that `unwanted` picks out.
 
     What's left of the query string is kept byte for byte, since re-encoding it can break
     signed links.
     """
     try:
         parts = urlsplit(url.strip())
+    except ValueError:
+        return url.strip()
+    query = "&".join(pair for pair in parts.query.split("&") if pair and not unwanted(pair))
+    # A fragment is a position on the page, unless the site uses it for routing (#/inbox, #!/a).
+    fragment = parts.fragment if parts.fragment.startswith(("/", "!")) else ""
+    return urlunsplit(parts._replace(query=query, fragment=fragment))
+
+
+def page_of(url: str) -> str:
+    """A link without the parts that only aim it at a spot on the page: the address to fetch.
+
+    Tracking parameters stay, because a newsletter's redirector may need them to work.
+    """
+    return _without(url, lambda pair: _name(pair) in POSITION_PARAMS)
+
+
+def clean(url: str) -> str:
+    """Normalize a URL and strip what doesn't say which page it is: the address to know it by."""
+    url = _without(url, lambda pair: _is_tracking(pair) or _name(pair) in POSITION_PARAMS)
+    try:
+        parts = urlsplit(url)
         host = (parts.hostname or "").lower()
         port = parts.port
     except ValueError:
-        return url.strip()
+        return url
     if not host:
-        return url.strip()
+        return url
     scheme = parts.scheme.lower()
     netloc = f"[{host}]" if ":" in host else host
     if port and (scheme, port) not in {("http", 80), ("https", 443)}:
         netloc = f"{netloc}:{port}"
-    query = "&".join(pair for pair in parts.query.split("&") if pair and not _is_tracking(pair))
-    # A fragment is a position on the page, unless the site uses it for routing (#/inbox, #!/a).
-    fragment = parts.fragment if parts.fragment.startswith(("/", "!")) else ""
-    return urlunsplit((scheme, netloc, parts.path or "/", query, fragment))
+    return urlunsplit((scheme, netloc, parts.path or "/", parts.query, parts.fragment))
 
 
 def host(url: str) -> str:

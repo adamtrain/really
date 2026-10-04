@@ -214,8 +214,8 @@ def capture(
     if offline:
         return Capture(store.add(address, tags=tags), new=True)
     try:
-        # The link exactly as given: a newsletter's redirect may need parameters we'd strip.
-        landed, article = understand(link, fetch(link, client))
+        # With its tracking parameters still on: a newsletter's redirector may need them.
+        landed, article = understand(link, fetch(urls.page_of(link), client))
     except FetchError as e:
         return Capture(store.add(address, tags=tags), new=True, problem=str(e))
     if existing := store.by_url(landed):
