@@ -1,0 +1,58 @@
+[project]
+name = "really"
+version = "0.1.0"
+description = "A reading list for your terminal that remembers what you read."
+readme = "README.md"
+license = "CC0-1.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Adam Train", email = "adam@adametrain.com" }
+]
+requires-python = ">=3.13"
+keywords = ["reading-list", "read-later", "bookmarks", "full-text-search", "substack", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Text Processing :: Indexing",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "httpx>=0.28.1",
+    "pypdf>=6.19.0",
+    "rich>=15.0.0",
+    "trafilatura>=2.3.0",
+    "typer>=0.27.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/adamtrain/really"
+Repository = "https://github.com/adamtrain/really"
+Issues = "https://github.com/adamtrain/really/issues"
+
+[project.scripts]
+really = "really.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.21,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+    "ty>=0.0.84",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "C4", "PTH"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
