@@ -12,6 +12,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from . import urls
+from .expiry import covering
 from .pace import FASTEST_WPM, NEEDED, SHORTEST_WORDS, SLOWEST_WPM, Pace, Reading, middle
 from .store import MARK, UNMARK, Hit, Item, State, Stats, letters
 
@@ -42,9 +44,13 @@ def plural(n: int, word: str) -> str:
     return f"{n:,} {word}{ending}"
 
 
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
 def ago(moment: datetime, now: datetime | None = None) -> str:
     """A compact age: 5m, 3h, 2d, 6w, 4mo, 2y."""
-    seconds = ((now or datetime.now(UTC)) - moment).total_seconds()
+    seconds = ((now or _now()) - moment).total_seconds()
     minutes, hours, days = seconds / 60, seconds / 3600, seconds / 86400
     if minutes < 1:
         return "now"
@@ -64,6 +70,27 @@ def ago(moment: datetime, now: datetime | None = None) -> str:
 def _when(moment: datetime, now: datetime | None = None) -> str:
     age = ago(moment, now)
     return "just now" if age == "now" else f"{age} ago"
+
+
+def left(moment: datetime, now: datetime | None = None) -> str:
+    """How long until a moment, compactly: 2d left, 5h left, 40m left. Once it's past, "due"."""
+    seconds = (moment - (now or _now())).total_seconds()
+    if seconds <= 0:
+        return "due"
+    if seconds < 3600:
+        return f"{max(1, int(seconds / 60))}m left"
+    if seconds < 86400:
+        return f"{int(seconds / 3600)}h left"
+    return f"{int(seconds / 86400)}d left"
+
+
+def span(seconds: int) -> str:
+    """A length of time in the largest unit that fits it exactly: 3 days, 36 hours, 2 weeks."""
+    for unit, size in (("week", 604800), ("day", 86400)):
+        if seconds % size == 0:
+            return plural(seconds // size, unit)
+    hours = seconds / 3600
+    return f"{hours:g} hour{'' if hours == 1 else 's'}"
 
 
 def duration(minutes: int) -> str:
@@ -101,7 +128,7 @@ def byline(item: Item) -> str:
 def _age_style(item: Item, now: datetime | None) -> str:
     if item.archived:
         return FAINT
-    days = ((now or datetime.now(UTC)) - item.added_at).days
+    days = ((now or _now()) - item.added_at).days
     if days >= ANCIENT_DAYS:
         return ERROR
     return STALE if days >= STALE_DAYS else FAINT
@@ -142,12 +169,15 @@ def listing(console: Console, items: list[Item], *, now: datetime | None = None)
     table.add_column("Kept" if archived else "Added", justify="right", no_wrap=True)
     for item in items:
         moment = item.archived_at if archived and item.archived_at else item.added_at
+        age = Text(ago(moment, now), style=_age_style(item, now))
+        if item.expires_at:  # it's from a site whose unread things get deleted
+            age.append(f" · {left(item.expires_at, now)}", style=STALE)
         table.add_row(
             _number(item, mixed=not archived),
             _title(item),
             byline(item),
             reading_time(item) or Text("—", style=FAINT),
-            Text(ago(moment, now), style=_age_style(item, now)),
+            age,
         )
     console.print()
     console.print(table)
@@ -270,6 +300,11 @@ def renumbered(console: Console, state: State, moves: list[tuple[int, int]]) -> 
             f"{span(run, 0)} {'is' if len(run) == 1 else 'are'} now {span(run, 1)}" for run in runs
         )
     console.print(Text(f"  {what}: {told}.", style=FAINT))
+
+
+def address(console: Console, item: Item) -> None:
+    """An item's link on a line of its own and never cut short, for when the item is gone."""
+    console.print(Text(f"  {item.url}", style=FAINT), overflow="fold")
 
 
 def added(console: Console, item: Item, queue_size: int) -> None:
@@ -404,6 +439,11 @@ def details(console: Console, item: Item, *, now: datetime | None = None) -> Non
         grid.add_row("Opened", _dated(item.opened_at, now))
     if item.archived_at:
         grid.add_row("Archived", _dated(item.archived_at, now))
+    if item.expires_at:
+        local = item.expires_at.astimezone()
+        expiry = Text(f"{local.day} {local:%B %Y}, {local:%H:%M}", style=STALE)
+        expiry.append(f" · {left(item.expires_at, now)}, unless you've read it", style=FAINT)
+        grid.add_row("Expires", expiry)
     console.print()
     console.print(card(item, width, now=now))
     console.print(Padding(grid, (0, 0, 0, 3)), width=width)
@@ -598,3 +638,59 @@ def pace(
         Padding(Text.from_markup(explanation, style=FAINT), (0, 0, 0, 2)), width=_width(console)
     )
     console.print()
+
+
+# ── Expiry ────────────────────────────────────────────────────────────────────
+
+
+def _waiting(queue: list[Item], site: str, rules: dict[str, int]) -> list[Item]:
+    """The queued items a site's rule covers."""
+    return [item for item in queue if covering(urls.host(item.url), rules) == site]
+
+
+def expiries(
+    console: Console, rules: dict[str, int], queue: list[Item], *, now: datetime | None = None
+) -> None:
+    """The sites whose unread things get deleted, how long each is given, and what's waiting."""
+    console.print()
+    if not rules:
+        console.print(Text.assemble(("◇ ", ACCENT), ("Nothing expires.", "bold")))
+        hint = (
+            "  [bold]really expire SITE 3d[/] has anything from a site deleted if it's still "
+            "unread after three days."
+        )
+        console.print(Text.from_markup(hint, style=FAINT))
+        console.print()
+        return
+    console.print(
+        Text.assemble(("◇ ", ACCENT), ("Unread things from these sites are deleted", "bold"))
+    )
+    table = Table(box=None, padding=(0, 1), show_header=False)
+    table.add_column()
+    table.add_column(style="bold")
+    table.add_column(style=FAINT)
+    for site, seconds in rules.items():
+        waiting = _waiting(queue, site, rules)
+        soonest = min((item.expires_at for item in waiting if item.expires_at), default=None)
+        note = f"{len(waiting)} waiting, the next has {left(soonest, now)}" if soonest else ""
+        table.add_row(site, f"after {span(seconds)}", note)
+    console.print(Padding(table, (0, 0, 0, 1)))
+    console.print()
+
+
+def expiry_set(
+    console: Console,
+    site: str,
+    rules: dict[str, int],
+    queue: list[Item],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Confirm a rule, and say what it means for anything already waiting."""
+    told = f"Unread things from {site} will be deleted after {span(rules[site])}."
+    console.print(Text.assemble(("✓ ", f"bold {ACCENT}"), (told, "bold")))
+    waiting = [(item.ref, item.expires_at) for item in _waiting(queue, site, rules)]
+    if waiting:
+        each = ", ".join(f"#{ref} ({left(due, now)})" for ref, due in waiting[:6] if due)
+        more = f" and {len(waiting) - 6} more" if len(waiting) > 6 else ""
+        console.print(Text(f"  Waiting now: {each}{more}.", style=FAINT))

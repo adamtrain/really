@@ -146,6 +146,27 @@ $ really archive 3
 When the list has got away from you, `really review` shows each item in turn and asks whether to
 open, archive, delete or skip it.
 
+### Things that go stale
+
+Some sources aren't worth reading late. You can tell really how long a site's posts keep:
+
+```sh
+really expire thezvi.substack.com 3d         # hours (h), days (d) or weeks (w)
+really expire                                # what you've set, and what's waiting under it
+really expire thezvi.substack.com --remove
+```
+
+From then on, anything from that site that's still in your queue three days after it joined is
+deleted. Archiving is what keeps something: a post you opened but never archived expires like
+any other, and the archive never expires. A rule covers everything under a site, so one for
+`example.com` covers `news.example.com` unless that has a rule of its own.
+
+Nothing runs in the background. Expiry happens the next time you run any really command, which
+tells you what went, with its link in case you want it back, and how the queue was renumbered.
+A command that names an item does what you asked first, so a number still means what it meant
+when you last looked, and `really done` on something overdue archives it all the same. The
+queue shows how long each such item has left, and so does `really info`.
+
 ### The short version
 
 ```sh
@@ -268,6 +289,7 @@ login.
 | `really refresh [ITEMS]…` | Fetch pages again. With no items, everything that has no saved copy; `--all` for the lot |
 | `really import safari` | Bring in Safari's Reading List |
 | `really export [DIR]` | Write the archive as Markdown files, or `--json` for everything |
+| `really expire [SITE] [AFTER]` | Delete unread things from a site after a while; with no site, list those rules |
 | `really stats` | Counts, reading time, and where your list is stored |
 
 `list`, `search`, `info` and `show` take `--json` for scripts. Results go to stdout; progress and errors
@@ -354,6 +376,7 @@ src/really/
 ├── extract.py    # title, author and article text from HTML and PDFs
 ├── store.py      # the SQLite file and its full-text index
 ├── pace.py       # working out your reading speed from timed reads
+├── expiry.py     # sites whose unread posts are deleted after a while
 ├── summarize.py  # asking Claude for a summary, through the claude command
 ├── safari.py     # reading Safari's Reading List
 ├── export.py     # Markdown and JSON export

@@ -1,6 +1,7 @@
 import io
 import json
 import plistlib
+import re
 from datetime import datetime
 
 import pytest
@@ -590,6 +591,167 @@ def test_requeue(home):
     assert "Requeued #a → #1 Tidy Queues, Tidy Mind" in ok("requeue", "tidy")
     assert items(home)[0].state is State.QUEUED
     assert run("requeue", "1").exit_code == 1
+
+
+# ── Things that go stale ──────────────────────────────────────────────────────
+
+FIELDNOTES = "fieldnotes.example"  # where the blog post is from
+
+
+def test_expire_sets_lists_and_removes_rules(home):
+    assert "Nothing expires." in ok("expire")
+    output = ok("expire", FIELDNOTES, "3d")
+    assert "Unread things from fieldnotes.example will be deleted after 3 days." in output
+    ok("expire", "https://www.marginnotes.example/p/some-post?utm_source=x", "12h")  # by a link
+    listed = ok("expire")
+    assert "fieldnotes.example" in listed and "after 3 days" in listed
+    assert "marginnotes.example" in listed and "after 12 hours" in listed
+    with Store(home) as store:
+        assert store.expiries() == {FIELDNOTES: 3 * 86400, "marginnotes.example": 12 * 3600}
+    assert "Things from fieldnotes.example no longer expire." in ok(
+        "expire", FIELDNOTES, "--remove"
+    )
+    assert "fieldnotes.example" not in ok("expire")
+
+
+@pytest.mark.parametrize(
+    ("args", "complaint"),
+    [
+        (["zvi", "3d"], "doesn't look like a site"),
+        ([FIELDNOTES], "Say how long"),
+        ([FIELDNOTES, "soon"], "isn't a length of time"),
+        ([FIELDNOTES, "--remove"], "Nothing from fieldnotes.example was set to expire."),
+    ],
+)
+def test_expire_explains_what_it_cannot_do(home, args, complaint):
+    result = run("expire", *args)
+    assert result.exit_code == 1
+    assert complaint in result.output
+    with Store(home) as store:
+        assert store.expiries() == {}
+
+
+def test_something_unread_is_deleted_once_its_time_is_up(home, clock):
+    ok("expire", FIELDNOTES, "3d")
+    added = ok("add", BLOG, POST)
+    assert added.count("Expires in 3 days, unless you've read it by then.") == 1  # the blog post
+    clock.advance(days=2)
+    waiting = ok()
+    assert "Expired" not in waiting
+    assert "2d · 1d left" in waiting  # the blog post's row says how long it has
+    assert "waiting, the next has 1d left" in ok("expire")
+    clock.advance(days=1)
+    output = ok()
+    assert "Expired #1 Tidy Queues, Tidy Mind" in output
+    assert "unread after 3 days" in output
+    assert BLOG in output  # so it can be found again
+    assert "Queue renumbered: #2 is now #1." in output
+    assert output.index("Expired") < output.index("1 thing to read")  # before the list, not after
+    assert [(item.ref, item.url) for item in items(home)] == [("1", POST)]
+
+
+def test_reading_something_in_time_keeps_it_for_good(home, clock, browser):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG)
+    ok("next")
+    clock.advance(days=1)
+    ok("done")
+    clock.advance(days=300)
+    assert "Expired" not in ok()
+    assert [item.title for item in items(home, State.ARCHIVED)] == ["Tidy Queues, Tidy Mind"]
+
+
+def test_opening_something_is_not_reading_it(home, clock, browser):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG)
+    ok("next")
+    clock.advance(days=3)
+    assert "Expired #1 Tidy Queues, Tidy Mind" in ok()
+    assert items(home) == []
+
+
+def test_saying_you_are_done_with_something_overdue_still_keeps_it(home, clock, browser):
+    """You're telling it, right then, that you read it."""
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG)
+    ok("next")
+    clock.advance(days=5)
+    output = ok("done")
+    assert "Archived #1 → #a Tidy Queues, Tidy Mind" in output
+    assert "Expired" not in output
+    assert len(items(home, State.ARCHIVED)) == 1
+
+
+def test_a_number_means_what_it_meant_when_you_last_saw_the_list(home, clock):
+    """Expiry waits until the command has done what was asked, then says what moved."""
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG, POST, LONGREAD)
+    clock.advance(days=3)  # the blog post, #1, is now overdue, and nothing has been run since
+    output = ok("delete", "3")
+    assert "Deleted #3 The Long One" in output
+    assert "Expired #1 Tidy Queues, Tidy Mind" in output
+    assert output.index("Deleted") < output.index("Expired")
+    assert "Queue renumbered: #2 is now #1." in output
+    assert [(item.ref, item.url) for item in items(home)] == [("1", POST)]
+
+
+def test_something_that_has_expired_cannot_be_opened(home, clock, browser):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG, POST)
+    clock.advance(days=3)
+    result = run("open", "1")
+    assert result.exit_code == 1
+    assert "Expired #1 Tidy Queues, Tidy Mind" in result.output
+    assert browser == []
+    ok("open", "1")  # and #1 is now the other one
+    assert browser == [POST]
+
+
+def test_expiry_is_reported_apart_from_what_a_script_reads(home, clock):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG, POST)
+    clock.advance(days=3)
+    result = run("list", "--json")
+    assert [entry["url"] for entry in json.loads(result.stdout)] == [POST]
+    assert "Expired #1 Tidy Queues, Tidy Mind" in result.stderr
+
+
+def test_a_new_rule_takes_what_is_already_overdue(home, clock):
+    ok("add", BLOG, POST)
+    clock.advance(days=5)
+    output = ok("expire", FIELDNOTES, "3d")
+    assert output.index("will be deleted after 3 days") < output.index("Expired #1 Tidy Queues")
+    assert [item.url for item in items(home)] == [POST]
+
+
+def test_a_new_rule_says_what_is_waiting_under_it(home, clock):
+    ok("add", BLOG, POST)
+    clock.advance(days=1)
+    assert "Waiting now: #1 (2d left)." in ok("expire", FIELDNOTES, "3d")
+
+
+def test_info_says_when_something_will_expire(home, clock):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG, POST)
+    clock.advance(hours=12)
+    details = " ".join(ok("info", "1").split())
+    assert re.search(
+        r"Expires \d{1,2} \w+ \d{4}, \d{2}:\d{2} · 2d left, unless you've read it", details
+    )
+    assert "Expires" not in ok("info", "2")
+    ok("archive", "1")
+    assert "Expires" not in ok("info", "a")
+
+
+def test_requeueing_gives_something_its_time_again(home, clock):
+    ok("expire", FIELDNOTES, "3d")
+    ok("add", BLOG)
+    ok("archive", "1")
+    clock.advance(days=30)
+    ok("requeue", "a")
+    assert "Expired" not in ok()
+    clock.advance(days=3)
+    assert "Expired #1 Tidy Queues, Tidy Mind" in ok()
 
 
 # ── Summaries ─────────────────────────────────────────────────────────────────

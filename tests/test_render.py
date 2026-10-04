@@ -278,3 +278,58 @@ def test_details_of_an_archived_item(item):
     text = printed(out)
     assert "#c" in text
     assert re.search(r"Archived +\d{1,2} \w+ 2026, \d{2}:\d{2} · 5h ago", text)
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (3 * 86400, "3 days"),
+        (86400, "1 day"),
+        (14 * 86400, "2 weeks"),
+        (604800, "1 week"),
+        (12 * 3600, "12 hours"),
+        (3600, "1 hour"),
+        (36 * 3600, "36 hours"),
+        (5400, "1.5 hours"),
+    ],
+)
+def test_span(seconds, text):
+    assert render.span(seconds) == text
+
+
+@pytest.mark.parametrize(
+    ("until", "text"),
+    [
+        (timedelta(days=2, hours=23), "2d left"),
+        (timedelta(days=1), "1d left"),
+        (timedelta(hours=23, minutes=59), "23h left"),
+        (timedelta(minutes=40), "40m left"),
+        (timedelta(seconds=20), "1m left"),
+        (timedelta(0), "due"),
+        (timedelta(days=-4), "due"),
+    ],
+)
+def test_left(until, text):
+    assert render.left(NOW + until, NOW) == text
+
+
+def test_a_row_says_how_long_something_has_before_it_expires(item):
+    out = console()
+    waiting = replace(item, added_at=NOW - timedelta(days=2), expires_at=NOW + timedelta(days=1))
+    render.listing(out, [waiting, replace(item, added_at=NOW - timedelta(days=2))], now=NOW)
+    first, second = printed(out).splitlines()[-2:]
+    assert first.rstrip().endswith("2d · 1d left")
+    assert second.rstrip().endswith("2d")
+
+
+def test_expiry_rules_are_listed_with_what_waits_under_them(item):
+    out = console()
+    rules = {"example.com": 3 * 86400, "news.example.org": 12 * 3600}
+    waiting = [
+        replace(item, expires_at=NOW + timedelta(days=2)),
+        replace(item, expires_at=NOW + timedelta(hours=5)),
+    ]
+    render.expiries(out, rules, waiting, now=NOW)
+    lines = [" ".join(line.split()) for line in printed(out).splitlines()]
+    assert "example.com after 3 days 2 waiting, the next has 5h left" in lines
+    assert "news.example.org after 12 hours" in lines

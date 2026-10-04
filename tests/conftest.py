@@ -156,7 +156,7 @@ def web() -> Web:
 
 
 class Clock:
-    """Stands in for the store's clock, so a test can let time pass."""
+    """Stands in for the clock, so a test can let time pass."""
 
     def __init__(self) -> None:
         self.now = datetime.now(UTC).replace(microsecond=0)
@@ -172,6 +172,7 @@ class Clock:
 def clock(monkeypatch) -> Clock:
     clock = Clock()
     monkeypatch.setattr("really.store._now", clock)
+    monkeypatch.setattr("really.render._now", clock)
     return clock
 
 

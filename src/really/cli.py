@@ -25,6 +25,7 @@ from rich.text import Text
 
 from . import __version__, render, safari, urls
 from .clipboard import ClipboardError, read_clipboard
+from .expiry import parse_span, site_of
 from .export import to_dict, write_markdown
 from .extract import Article, extract, same_article
 from .fetch import FetchError, Page, fetch, new_client
@@ -158,19 +159,59 @@ NO_LINKS = {
 
 
 @contextmanager
-def library() -> Iterator[Store]:
-    """Open the reading list, turning database trouble into a readable error."""
+def library(sweep_first: bool = False) -> Iterator[Store]:
+    """Open the reading list, turning database trouble into a readable error.
+
+    Each command also deletes whatever has expired (see sweep). Commands that list things do
+    it first, so what they show is current. The rest do it last, so that a number you give
+    still means what it meant when you last saw the list.
+    """
     path = default_path()
     try:
         store = Store(path)
     except (StoreError, sqlite3.Error, OSError) as e:
         fail(f"Couldn't open your reading list at {path}.", detail=str(e))
     try:
+        if sweep_first:
+            sweep(store)
         yield store
+        sweep(store)
     except sqlite3.Error as e:
         fail("Something went wrong with the reading list's database.", detail=str(e))
     finally:
         store.close()
+
+
+def sweep(store: Store) -> None:
+    """Delete what has waited unread past its time, and say so.
+
+    There's nothing running in the background, so this is where expiry happens: inside
+    whatever command comes next. It's reported on stderr, to leave --json output alone.
+    """
+    expired = store.expired()
+    if not expired:
+        return
+    with renumbering(store, err):
+        for item in expired:
+            store.delete(item.id)
+            kept = (item.expires_at or item.queued_at) - item.queued_at
+            unread = f"unread after {render.span(int(kept.total_seconds()))}"
+            render.receipt(err, "Expired", item, unread, style=render.FAINT, mark="✗")
+            render.address(err, item)
+
+
+def current(store: Store, ref: str, state: State | None = None) -> Item:
+    """Find the item you mean, let expiry run, and make sure it's still there.
+
+    In that order: the number is looked up before anything ahead of it can expire and
+    shift it. If what you named has itself expired, sweep has just said so.
+    """
+    item = find(store, ref, state)
+    sweep(store)
+    still_here = store.get(item.id)
+    if still_here is None:
+        raise typer.Exit(1)
+    return still_here
 
 
 def find(store: Store, ref: str, state: State | None = None) -> Item:
@@ -314,7 +355,7 @@ def read_now(store: Store, item: Item) -> None:
 
 
 @contextmanager
-def renumbering(store: Store) -> Iterator[None]:
+def renumbering(store: Store, console: Console | None = None) -> Iterator[None]:
     """Afterwards, say which items the block left with a new number or new letters.
 
     Whatever leaves the queue or the archive, the rest close up behind it. Something that
@@ -328,7 +369,7 @@ def renumbering(store: Store) -> Iterator[None]:
             was = before.get(item.id)
             if was and was[0] is state and was[1] != item.number:
                 moves.append((was[1], item.number))
-        render.renumbered(out, state, moves)
+        render.renumbered(console or out, state, moves)
 
 
 def keep(store: Store, client: httpx.Client, item: Item) -> Item:
@@ -367,7 +408,8 @@ def discard(store: Store, item: Item) -> None:
     """Delete an item. If you'd just read it, that read is timed first."""
     reading = store.finish(item.id)
     store.delete(item.id)
-    render.receipt(out, "Deleted", item, item.url, style=render.FAINT, mark="✗")
+    render.receipt(out, "Deleted", item, style=render.FAINT, mark="✗")
+    render.address(out, item)
     if reading:
         render.timed(out, reading, store.pace())
 
@@ -379,7 +421,7 @@ def show_list(
     reverse: bool = False,
     as_json: bool = False,
 ) -> None:
-    with library() as store:
+    with library(sweep_first=True) as store:
         items = store.items(state, tag)
     if sort is Sort.LENGTH:
         items.sort(key=lambda item: item.words)
@@ -493,7 +535,7 @@ def add(
         if not typer.confirm(f"Add all {len(found)}?", default=True, err=True):
             raise typer.Exit(0)
 
-    with library() as store, new_client() as client:
+    with library(sweep_first=True) as store, new_client() as client:
         for link in found:
             with err.status(render.progress_message("Fetching", link), spinner_style=render.ACCENT):
                 result = capture(store, client, link, tags=tag or [], offline=offline)
@@ -510,6 +552,9 @@ def add(
                 )
             elif item.paywalled:
                 render.note(out, "It's paywalled: only the free preview could be read.")
+            if item.expires_at:
+                kept = render.span(int((item.expires_at - item.queued_at).total_seconds()))
+                render.note(out, f"Expires in {kept}, unless you've read it by then.")
 
 
 @app.command("list", rich_help_panel=READ)
@@ -560,7 +605,7 @@ def next_(
     ] = False,
 ) -> None:
     """Open the next thing to read: the one that's been waiting longest."""
-    with library() as store:
+    with library(sweep_first=True) as store:
         queue = store.items(State.QUEUED, tag)
         if not queue:
             render.queue_summary(out, [])
@@ -586,7 +631,7 @@ def next_(
 def open_(ref: Ref) -> None:
     """Open something in your browser."""
     with library() as store:
-        read_now(store, find(store, ref))
+        read_now(store, current(store, ref))
 
 
 @app.command(rich_help_panel=READ)
@@ -596,7 +641,7 @@ def info(ref: Ref, as_json: AsJson = False) -> None:
     For the saved copy itself, there's [bold]really show[/].
     """
     with library() as store:
-        item = find(store, ref)
+        item = current(store, ref)
     if as_json:
         print(json.dumps(to_dict(item), indent=2, ensure_ascii=False))
     else:
@@ -611,7 +656,7 @@ def tldr(ref: Ref) -> None:
     The summary is kept, so it's only ever asked for once.
     """
     with library() as store:
-        item = find(store, ref)
+        item = current(store, ref)
         if not item.words:
             fail(
                 f"There's no saved copy of #{item.ref} to summarize.",
@@ -655,7 +700,7 @@ def review(
     For a queue that's got away from you: open, archive, delete or skip each item in turn.
     """
     tally: Counter[str] = Counter()
-    with library() as store, new_client() as client:
+    with library(sweep_first=True) as store, new_client() as client:
         queue = store.items(State.QUEUED, tag)
         if not queue:
             render.queue_summary(out, [])
@@ -807,7 +852,7 @@ def search(
     """
     text = " ".join(query)
     state = None if archive == queue else State.ARCHIVED if archive else State.QUEUED
-    with library() as store:
+    with library(sweep_first=True) as store:
         results = store.search(text, state, tag, limit)
     if as_json:
         print(json.dumps([to_dict(hit.item) for hit in results], indent=2, ensure_ascii=False))
@@ -826,7 +871,7 @@ def show(
     Piped somewhere else, it prints the copy as plain Markdown.
     """
     with library() as store:
-        item = find(store, ref)
+        item = current(store, ref)
         content = store.content(item.id)
     if as_json:
         print(json.dumps(to_dict(item, content), indent=2, ensure_ascii=False))
@@ -869,7 +914,7 @@ def tag(
 ) -> None:
     """Add or remove tags."""
     with library() as store:
-        item = find(store, ref)
+        item = current(store, ref)
         dropped = {t.lower().lstrip("#") for t in remove or []}
         kept = [t for t in item.tags if t not in dropped]
         item = store.set_tags(item.id, [*kept, *(tags or [])])
@@ -900,7 +945,7 @@ def edit(
     if not changes:
         fail("Nothing to change.", hint='Say what, like [bold]--author "Rich Sutton"[/].')
     with library() as store:
-        item = store.edit(find(store, ref).id, **changes)
+        item = store.edit(current(store, ref).id, **changes)
         out.print()
         out.print(render.card(item, min(out.width, render.READING_WIDTH)))
         out.print()
@@ -924,7 +969,11 @@ def paste(ref: OptionalRef = None) -> None:
             hint="Select the article's text in your browser and copy it first.",
         )
     with library() as store:
-        item = store.set_text(finished(store, ref).id, text)
+        target = finished(store, ref)
+        sweep(store)
+        if store.get(target.id) is None:
+            raise typer.Exit(1)  # it has just expired, as sweep said
+        item = store.set_text(target.id, text)
         style = render.ARCHIVE if item.archived else render.ACCENT
         render.receipt(out, "Saved your copy of", item, f"{item.words:,} words", style=style)
 
@@ -952,7 +1001,9 @@ def refresh(
         fail("Name some items or pass --all, not both.")
     with library() as store, new_client() as client:
         if refs:
-            items = [find(store, ref) for ref in refs]
+            named = [find(store, ref) for ref in refs]
+            sweep(store)
+            items = [item for item in map(store.get, (item.id for item in named)) if item]
         else:
             items = [item for item in store.items() if everything or not item.words]
         if not items:
@@ -1069,10 +1120,72 @@ def export_(
 @app.command(rich_help_panel=UPKEEP)
 def stats() -> None:
     """How much is waiting, how much you've kept, where it all lives."""
-    with library() as store:
+    with library(sweep_first=True) as store:
         numbers = store.stats()
         path = str(store.path).replace(str(Path.home()), "~", 1)
     render.stats(out, numbers, path)
+
+
+@app.command(rich_help_panel=UPKEEP)
+def expire(
+    site: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[SITE]",
+            help="A site's address, or a link to something on it.",
+            show_default=False,
+        ),
+    ] = None,
+    after: Annotated[
+        str | None,
+        typer.Argument(
+            metavar="[AFTER]",
+            help="How long its unread things are kept: 3d, 12h, 2w.",
+            show_default=False,
+        ),
+    ] = None,
+    remove: Annotated[
+        bool, typer.Option("--remove", "-r", help="Stop expiring things from this site.")
+    ] = False,
+) -> None:
+    """Have unread things from a site deleted once they've waited too long.
+
+    For sources that go stale, like news. [bold]really expire thezvi.substack.com 3d[/]
+    deletes anything from there that's still in your queue three days after it joined.
+    Only archiving something keeps it; the archive never expires.
+
+    With no site, lists the sites you've set this for.
+    """
+    with library(sweep_first=site is None) as store:
+        if site is None:
+            render.expiries(out, store.expiries(), store.items(State.QUEUED))
+            return
+        domain = site_of(site)
+        if not domain:
+            fail(
+                f"“{site}” doesn't look like a site.",
+                hint="Give its address, like [bold]thezvi.substack.com[/], or a link to a post.",
+            )
+        if remove:
+            if not store.remove_expiry(domain):
+                fail(f"Nothing from {domain} was set to expire.")
+            told = f"Things from {domain} no longer expire."
+            out.print(Text.assemble(("✓ ", f"bold {render.ACCENT}"), (told, "bold")))
+            return
+        if after is None:
+            fail(
+                "Say how long unread things from there should be kept.",
+                hint=f"Like [bold]really expire {domain} 3d[/]. Hours (h), days (d) or weeks (w).",
+            )
+        try:
+            seconds = parse_span(after)
+        except ValueError:
+            fail(
+                f"“{after}” isn't a length of time I can read.",
+                hint="Use hours, days or weeks: [bold]12h[/], [bold]3d[/], [bold]2w[/].",
+            )
+        store.set_expiry(domain, seconds)
+        render.expiry_set(out, domain, store.expiries(), store.items(State.QUEUED))
 
 
 def main() -> None:

@@ -14,6 +14,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from . import urls
+from .expiry import rule_for
 from .extract import Article
 from .pace import RECENT, Pace, Reading, estimate, reading_minutes
 
@@ -35,6 +36,7 @@ FIELDS = (
     "paywalled",
     "state",
     "added_at",
+    "queued_at",
     "opened_at",
     "archived_at",
     "fetched_at",
@@ -119,8 +121,19 @@ SUMMARIES = """
 ALTER TABLE items ADD COLUMN tldr TEXT NOT NULL DEFAULT '';
 """
 
+# Sites whose unread posts are deleted after a while, and how long each is given. The clock
+# runs from when an item joined the queue, which is `added_at` unless it was sent back there.
+EXPIRIES = """
+ALTER TABLE items ADD COLUMN queued_at TEXT NOT NULL DEFAULT '';
+UPDATE items SET queued_at = added_at;
+CREATE TABLE expiries (
+    domain  TEXT PRIMARY KEY,
+    seconds INTEGER NOT NULL
+);
+"""
+
 # Each script takes the file from one version to the next; a new file runs them all.
-MIGRATIONS = (SCHEMA, READINGS, NUMBERS, SUMMARIES)
+MIGRATIONS = (SCHEMA, READINGS, NUMBERS, SUMMARIES, EXPIRIES)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 # The next free place in a list: one past its last.
@@ -197,9 +210,11 @@ class Item:
     paywalled: bool
     state: State
     added_at: datetime
+    queued_at: datetime  # when it joined the queue: when it was added, or sent back there
     opened_at: datetime | None
     archived_at: datetime | None
     fetched_at: datetime | None
+    expires_at: datetime | None  # when it will be deleted, if it's still unread by then
 
     @property
     def ref(self) -> str:
@@ -317,7 +332,12 @@ def _moment(stamp: str | None) -> datetime | None:
     return datetime.fromisoformat(stamp) if stamp else None
 
 
-def _item(row: sqlite3.Row, wpm: int) -> Item:
+def _item(row: sqlite3.Row, wpm: int, rules: dict[str, int]) -> Item:
+    queued_at = datetime.fromisoformat(row["queued_at"])
+    # Whatever is still in the queue can expire, opened or not. Only archiving it says it was
+    # read, and the archive never expires.
+    waiting = row["state"] == State.QUEUED
+    kept = rule_for(urls.host(row["url"]), rules) if waiting and rules else None
     return Item(
         id=row["id"],
         number=row["number"],
@@ -334,9 +354,11 @@ def _item(row: sqlite3.Row, wpm: int) -> Item:
         paywalled=bool(row["paywalled"]),
         state=State(row["state"]),
         added_at=datetime.fromisoformat(row["added_at"]),
+        queued_at=queued_at,
         opened_at=_moment(row["opened_at"]),
         archived_at=_moment(row["archived_at"]),
         fetched_at=_moment(row["fetched_at"]),
+        expires_at=queued_at + timedelta(seconds=kept) if kept else None,
     )
 
 
@@ -348,6 +370,7 @@ class Store:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self._pace: Pace | None = None
+        self._rules: dict[str, int] | None = None
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise StoreError(
@@ -371,7 +394,7 @@ class Store:
     # ── Reading ───────────────────────────────────────────────────────────────
 
     def _load(self, row: sqlite3.Row) -> Item:
-        return _item(row, self.pace().wpm)
+        return _item(row, self.pace().wpm, self.expiries())
 
     def get(self, id: int) -> Item | None:
         row = self.db.execute(f"SELECT {COLUMNS} FROM items WHERE id = ?", (id,)).fetchone()
@@ -516,6 +539,21 @@ class Store:
             pace=self.pace(),
         )
 
+    def expiries(self) -> dict[str, int]:
+        """The sites whose unread items are deleted, and after how many seconds for each."""
+        if self._rules is None:
+            rows = self.db.execute("SELECT domain, seconds FROM expiries ORDER BY domain")
+            self._rules = {row["domain"]: row["seconds"] for row in rows}
+        return self._rules
+
+    def expired(self) -> list[Item]:
+        """What's waited unread past its time, and so is due to be deleted."""
+        if not self.expiries():
+            return []
+        now = _now()
+        queue = self.items(State.QUEUED)
+        return [item for item in queue if item.expires_at and item.expires_at <= now]
+
     def readings(self, limit: int = RECENT) -> list[Reading]:
         """Your latest timed reads, newest first."""
         rows = self.db.execute(
@@ -561,8 +599,9 @@ class Store:
         cursor = self.db.execute(
             f"""
             INSERT INTO items (url, title, author, site, published, summary, tags, content, text,
-                               words, paywalled, state, added_at, archived_at, fetched_at, number)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {NEXT.replace(":state", "?")})
+                               words, paywalled, state, added_at, archived_at, fetched_at,
+                               queued_at, number)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {NEXT.replace(":state", "?")})
             """,
             (
                 url,
@@ -580,6 +619,7 @@ class Store:
                 _stamp(added),
                 _stamp(added) if state is State.ARCHIVED else None,
                 _stamp(_now()) if fetched else None,
+                _stamp(_now()),  # not `added`: something imported with an old date joins now
                 str(state),
             ),
         )
@@ -636,6 +676,20 @@ class Store:
     def set_tags(self, id: int, tags: Iterable[str]) -> Item:
         return self._set(id, tags=" ".join(normalize_tags(tags)))
 
+    def set_expiry(self, domain: str, seconds: int) -> None:
+        """Have unread items from a site (and anything under it) deleted after this long."""
+        self.db.execute(
+            "INSERT OR REPLACE INTO expiries (domain, seconds) VALUES (?, ?)", (domain, seconds)
+        )
+        self.db.commit()
+        self._rules = None
+
+    def remove_expiry(self, domain: str) -> bool:
+        removed = self.db.execute("DELETE FROM expiries WHERE domain = ?", (domain,)).rowcount
+        self.db.commit()
+        self._rules = None
+        return bool(removed)
+
     def record(self, reading: Reading) -> None:
         self.db.execute(
             "INSERT INTO readings (words, seconds, finished_at) VALUES (?, ?, ?)",
@@ -676,7 +730,9 @@ class Store:
         item = self._require(id)
         if not item.archived:
             return item
-        return self._move(item, State.QUEUED, archived_at=None, opened_at=None)
+        return self._move(
+            item, State.QUEUED, archived_at=None, opened_at=None, queued_at=_stamp(_now())
+        )
 
     def delete(self, id: int) -> None:
         item = self.get(id)

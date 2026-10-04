@@ -13,6 +13,7 @@ from really.store import (
     SCHEMA_VERSION,
     UNMARK,
     Ambiguous,
+    Item,
     NotFound,
     State,
     Store,
@@ -645,9 +646,137 @@ def test_a_list_from_before_summaries_gains_a_place_for_them(tmp_path):
         [item] = store.items()
         assert (item.title, item.ref, store.tldr(item.id)) == ("From Before", "1", "")
         store.set_tldr(item.id, "An heirloom.")
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 4
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with Store(path) as store:
         assert store.tldr(1) == "An heirloom."
+
+
+# ── Things that go stale ──────────────────────────────────────────────────────
+
+DAY = 86400
+
+
+def news(store, slug: str, **more) -> Item:
+    article = Article(title=f"News {slug}", text="word " * 500)
+    return store.add(f"https://news.example.com/{slug}", article, fetched=True, **more)
+
+
+def test_rules_are_kept_in_the_list(store, tmp_path):
+    assert store.expiries() == {}
+    store.set_expiry("news.example.com", 3 * DAY)
+    store.set_expiry("example.org", 12 * 3600)
+    store.set_expiry("news.example.com", 2 * DAY)  # setting it again replaces it
+    assert store.expiries() == {"example.org": 12 * 3600, "news.example.com": 2 * DAY}
+    assert store.remove_expiry("example.org")
+    assert not store.remove_expiry("example.org")
+    with Store(store.path) as reopened:
+        assert reopened.expiries() == {"news.example.com": 2 * DAY}
+
+
+def test_something_unread_expires_when_its_time_is_up(store, clock):
+    store.set_expiry("news.example.com", 3 * DAY)
+    item = news(store, "monday")
+    assert item.expires_at == item.queued_at + timedelta(days=3)
+    clock.advance(days=2, hours=23)
+    assert store.expired() == []
+    clock.advance(hours=1)
+    assert [due.id for due in store.expired()] == [item.id]
+
+
+def test_only_what_a_rule_covers_expires(store, clock, lesson):
+    store.set_expiry("news.example.com", 3 * DAY)
+    item = news(store, "monday")
+    clock.advance(days=30)
+    assert lesson.expires_at is None  # it's from somewhere else
+    assert [due.id for due in store.expired()] == [item.id]
+    store.remove_expiry("news.example.com")
+    assert store.expired() == []
+    assert store.get(item.id).expires_at is None
+
+
+def test_opening_something_does_not_save_it(store, clock):
+    """Only archiving it says it was read."""
+    store.set_expiry("news.example.com", 3 * DAY)
+    item = news(store, "monday")
+    clock.advance(days=2)
+    opened = store.mark_opened(item.id)
+    assert opened.expires_at == item.expires_at
+    clock.advance(days=1)
+    assert [due.id for due in store.expired()] == [item.id]
+
+
+def test_the_archive_never_expires(store, clock):
+    store.set_expiry("news.example.com", 3 * DAY)
+    kept = store.archive(news(store, "monday").id)
+    straight_in = news(store, "tuesday", state=State.ARCHIVED)
+    clock.advance(days=30)
+    assert kept.expires_at is None and straight_in.expires_at is None
+    assert store.expired() == []
+
+
+def test_sending_something_back_to_the_queue_starts_its_clock_again(store, clock):
+    store.set_expiry("news.example.com", 3 * DAY)
+    item = store.archive(news(store, "monday").id)
+    clock.advance(days=30)
+    back = store.requeue(item.id)
+    assert back.added_at == item.added_at  # when it was first added hasn't changed
+    assert back.queued_at == clock.now
+    assert back.expires_at == clock.now + timedelta(days=3)
+    assert store.expired() == []
+    clock.advance(days=3)
+    assert [due.id for due in store.expired()] == [item.id]
+
+
+def test_something_brought_in_with_an_old_date_gets_its_full_time(store, clock):
+    store.set_expiry("news.example.com", 3 * DAY)
+    long_ago = clock.now - timedelta(days=400)
+    item = news(store, "from-safari", added_at=long_ago)
+    assert item.added_at == long_ago
+    assert item.expires_at == clock.now + timedelta(days=3)
+    assert store.expired() == []
+
+
+def test_a_new_rule_applies_to_what_is_already_waiting(store, clock):
+    item = news(store, "monday")
+    clock.advance(days=5)
+    assert store.expired() == []
+    store.set_expiry("example.com", 3 * DAY)  # the parent domain covers it
+    assert [due.id for due in store.expired()] == [item.id]
+    store.set_expiry("news.example.com", 7 * DAY)  # but a nearer rule wins
+    assert store.expired() == []
+
+
+def test_a_list_from_before_expiry_is_upgraded(tmp_path):
+    path = tmp_path / "really.db"
+    old = sqlite3.connect(path)
+    for script in MIGRATIONS[:4]:
+        old.executescript(script)
+    old.execute("PRAGMA user_version = 4")
+    old.execute(
+        "INSERT INTO items (url, title, text, words, number, added_at, tldr) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "https://example.com/old",
+            "From Before",
+            "an heirloom",
+            2,
+            1,
+            "2026-01-01T00:00:00+00:00",
+            "Old.",
+        ),
+    )
+    old.commit()
+    old.close()
+    with Store(path) as store:
+        [item] = store.items()
+        assert item.queued_at == item.added_at == datetime(2026, 1, 1, tzinfo=UTC)
+        assert item.expires_at is None and store.expiries() == {} and store.expired() == []
+        assert (store.tldr(item.id), store.search("heirloom")[0].item.ref) == ("Old.", "1")
+        store.set_expiry("example.com", DAY)
+        assert [due.title for due in store.expired()] == ["From Before"]
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+    with Store(path) as store:
+        assert store.expiries() == {"example.com": DAY}
 
 
 # ── The file ──────────────────────────────────────────────────────────────────
