@@ -339,9 +339,14 @@ def fetch_all(client: httpx.Client, links: list[str]) -> Iterator[Page | FetchEr
         yield from pool.map(attempt, links)
 
 
+def launch(store: Store, item: Item) -> None:
+    """Open an item for reading: its saved PDF if it has one, or else its link in the browser."""
+    typer.launch(str(store.file(item) or item.url))
+
+
 def read_now(store: Store, item: Item) -> None:
-    """Open an item in the browser and remember that you did."""
-    typer.launch(item.url)
+    """Open an item and remember that you did."""
+    launch(store, item)
     if not item.archived:
         item = store.mark_opened(item.id)
     out.print()
@@ -642,10 +647,11 @@ def info(ref: Ref, as_json: AsJson = False) -> None:
     """
     with library() as store:
         item = current(store, ref)
+        file = store.file(item)
     if as_json:
         print(json.dumps(to_dict(item), indent=2, ensure_ascii=False))
     else:
-        render.details(out, item)
+        render.details(out, item, file=file)
 
 
 @app.command(rich_help_panel=READ)
@@ -657,6 +663,11 @@ def tldr(ref: Ref) -> None:
     """
     with library() as store:
         item = current(store, ref)
+        if not item.words and item.pages:
+            fail(
+                f"#{item.ref} is a PDF with no text in it to summarize.",
+                hint="It looks like a scan: its pages are pictures of the text.",
+            )
         if not item.words:
             fail(
                 f"There's no saved copy of #{item.ref} to summarize.",
@@ -724,7 +735,7 @@ def review(
                 except (EOFError, KeyboardInterrupt):
                     choice = "q"
                 if choice == "o":
-                    typer.launch(item.url)
+                    launch(store, item)
                     store.mark_opened(item.id)
             if choice == "q":
                 break
@@ -1102,9 +1113,10 @@ def export_(
         )
     with library() as store:
         state = None if as_json else State.ARCHIVED
-        entries = [(item, store.content(item.id)) for item in store.items(state)]
+        chosen = store.items(state)
+        entries = [(item, store.content(item.id), store.file(item)) for item in chosen]
     if directory is None:
-        data = [to_dict(item, content) for item, content in entries]
+        data = [to_dict(item, content) for item, content, _ in entries]
         print(json.dumps(data, indent=2, ensure_ascii=False))
         return
     written = write_markdown(directory.expanduser(), entries)

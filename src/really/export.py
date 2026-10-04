@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from .store import Item
+from .urls import slug
 
 
 def to_dict(item: Item, content: str | None = None) -> dict:
@@ -26,6 +26,8 @@ def to_dict(item: Item, content: str | None = None) -> dict:
         "note": item.note,
         "state": str(item.state),
         "words": item.words,
+        "pages": item.pages or None,  # for a PDF
+        "file": item.file or None,  # its name in the pdfs folder beside the database
         "minutes": item.minutes,
         "paywalled": item.paywalled,
         "added_at": item.added_at.isoformat(),
@@ -40,12 +42,6 @@ def to_dict(item: Item, content: str | None = None) -> dict:
 def _day(moment: datetime) -> str:
     """The date as you'd have seen it on your own calendar."""
     return moment.astimezone().date().isoformat()
-
-
-def slug(text: str, length: int = 60) -> str:
-    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
-    words = re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")
-    return words[:length].rstrip("-") or "untitled"
 
 
 def filename(item: Item) -> str:
@@ -65,6 +61,8 @@ def markdown(item: Item, content: str) -> str:
         "archived": _day(item.archived_at) if item.archived_at else "",
         "tags": list(item.tags),
     }
+    if item.file:
+        details["pdf"] = Path(filename(item)).with_suffix(".pdf").name  # exported alongside
     # JSON strings and lists are valid YAML, and JSON's quoting is the unambiguous kind.
     front = [f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in details.items()]
     parts = ["---", *front, "---", "", f"# {item.name}", ""]
@@ -74,12 +72,18 @@ def markdown(item: Item, content: str) -> str:
     return "\n".join(parts)
 
 
-def write_markdown(directory: Path, entries: list[tuple[Item, str]]) -> list[Path]:
-    """Write one file per item into `directory`, creating it if need be."""
+def write_markdown(directory: Path, entries: list[tuple[Item, str, Path | None]]) -> list[Path]:
+    """Write one Markdown file per item into `directory`, creating it if need be.
+
+    Each entry is an item, its saved copy, and its saved PDF if it has one. The PDF is copied
+    in beside the Markdown, under the same name.
+    """
     directory.mkdir(parents=True, exist_ok=True)
     written = []
-    for item, content in entries:
+    for item, content, pdf in entries:
         path = directory / filename(item)
         path.write_text(markdown(item, content), encoding="utf-8")
+        if pdf:
+            shutil.copyfile(pdf, path.with_suffix(".pdf"))
         written.append(path)
     return written

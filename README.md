@@ -37,8 +37,10 @@
   waited too long change color.
 - **An archive you can search.** Archive an article and its full text is kept, stripped of
   navigation, subscribe boxes and comments. Find it again by anything it said.
-- **Yours.** Everything is one SQLite file on your disk. Export it to Markdown or JSON whenever
-  you like.
+- **PDFs too.** A link to a PDF saves the PDF itself, and it's measured, searched and opened
+  like anything else.
+- **Yours.** Everything is one SQLite file on your disk, with any PDFs in a folder beside it.
+  Export it to Markdown or JSON whenever you like.
 
 ## Install
 
@@ -103,6 +105,24 @@ really add -t papers https://arxiv.org/abs/1706.03762
 To save a link without opening a terminal, bind `really add` in anything that can run a shell
 command, such as Raycast, Alfred, or a Shortcuts *Run Shell Script* action. Launchers don't load
 your shell profile, so give them the full path (`~/.local/bin/really add`).
+
+### PDFs
+
+A link to a PDF works like any other, with one difference: the PDF itself is saved, in a `pdfs`
+folder beside your list.
+
+```sh
+really add https://arxiv.org/pdf/1706.03762
+```
+
+Its text is read for the word count and the search index, and `really next` and `really open`
+open your saved copy in your PDF viewer, not the link. The file stays with its item through the
+queue and the archive, and is deleted when the item is deleted or expires. `really export` copies
+it out beside the item's Markdown.
+
+Most PDFs don't state a title, so really takes the largest heading on the first page, which for
+papers is nearly always it. If that's wrong, `really edit` fixes it. A scan has no text to read,
+so it's listed by its page count and can't be searched or summarized.
 
 ### Coming from Safari's Reading List
 
@@ -303,9 +323,9 @@ or a folder, in your shell profile:
 export REALLY_DB=~/Documents/reading
 ```
 
-To take an existing list with you, move the file there. Anything that runs `really` outside your
-shell, like a launcher, needs the variable too, or it will start a second list in the default
-place.
+To take an existing list with you, move the file there, and the `pdfs` folder beside it if there
+is one. Anything that runs `really` outside your shell, like a launcher, needs the variable too,
+or it will start a second list in the default place.
 
 ## How it works
 
@@ -324,7 +344,10 @@ it was decoration, and if anything else does it stays.
 
 [trafilatura](https://trafilatura.readthedocs.io) finds the article in the page. really keeps two
 copies: Markdown with the links intact, which is what you read and export, and plain text, which
-is what gets searched. PDFs are read with [pypdf](https://pypdf.readthedocs.io).
+is what gets searched. PDFs are read with [pypdf](https://pypdf.readthedocs.io), which also
+reports the size of the type on the first page, and that is how a title is found when the file
+doesn't state one. Text running up the margin is ignored, since arXiv stamps its papers there in
+type larger than their titles.
 
 Some pages have to be put right before they can be read. Sites that stream a page in pieces, as
 LessWrong, the Alignment Forum and the EA Forum do, leave their title and metadata in the body,

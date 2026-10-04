@@ -8,7 +8,7 @@ import sqlite3
 import sys
 from collections import Counter
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +20,7 @@ from .pace import RECENT, Pace, Reading, estimate, reading_minutes
 
 ENV_DB = "REALLY_DB"
 FILENAME = "really.db"
+PDFS = "pdfs"  # the folder beside the database where saved PDFs go
 
 FIELDS = (
     "id",
@@ -33,6 +34,8 @@ FIELDS = (
     "tags",
     "note",
     "words",
+    "pages",
+    "file",
     "paywalled",
     "state",
     "added_at",
@@ -132,8 +135,15 @@ CREATE TABLE expiries (
 );
 """
 
+# A link to a PDF has the PDF itself saved, in a folder beside this file: `file` is its
+# name there, and `pages` how long it is, which is all there is to go on when it's a scan.
+FILES = """
+ALTER TABLE items ADD COLUMN file TEXT NOT NULL DEFAULT '';
+ALTER TABLE items ADD COLUMN pages INTEGER NOT NULL DEFAULT 0;
+"""
+
 # Each script takes the file from one version to the next; a new file runs them all.
-MIGRATIONS = (SCHEMA, READINGS, NUMBERS, SUMMARIES, EXPIRIES)
+MIGRATIONS = (SCHEMA, READINGS, NUMBERS, SUMMARIES, EXPIRIES, FILES)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 # The next free place in a list: one past its last.
@@ -206,6 +216,8 @@ class Item:
     tags: tuple[str, ...]
     note: str
     words: int
+    pages: int  # for a PDF, how many
+    file: str  # for a PDF, the name of the saved file
     minutes: int  # how long it takes to read, at your pace
     paywalled: bool
     state: State
@@ -350,6 +362,8 @@ def _item(row: sqlite3.Row, wpm: int, rules: dict[str, int]) -> Item:
         tags=tuple(row["tags"].split()),
         note=row["note"],
         words=row["words"],
+        pages=row["pages"],
+        file=row["file"],
         minutes=reading_minutes(row["words"], wpm),
         paywalled=bool(row["paywalled"]),
         state=State(row["state"]),
@@ -371,6 +385,8 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self._pace: Pace | None = None
         self._rules: dict[str, int] | None = None
+        # Saved PDFs go in a folder beside the database. One that's only in memory has no beside.
+        self.files = None if str(path) == ":memory:" else self.path.parent / PDFS
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
         if version > SCHEMA_VERSION:
             raise StoreError(
@@ -432,6 +448,13 @@ class Store:
         """The saved copy of an item, as Markdown. Empty if there isn't one."""
         row = self.db.execute("SELECT content FROM items WHERE id = ?", (id,)).fetchone()
         return row["content"] if row else ""
+
+    def file(self, item: Item) -> Path | None:
+        """Where an item's saved PDF is, if it has one and it's still there."""
+        if not (item.file and self.files):
+            return None
+        path = self.files / item.file
+        return path if path.is_file() else None
 
     def text(self, id: int) -> str:
         """The saved copy of an item, as plain text. Empty if there isn't one."""
@@ -599,9 +622,10 @@ class Store:
         cursor = self.db.execute(
             f"""
             INSERT INTO items (url, title, author, site, published, summary, tags, content, text,
-                               words, paywalled, state, added_at, archived_at, fetched_at,
+                               words, pages, paywalled, state, added_at, archived_at, fetched_at,
                                queued_at, number)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {NEXT.replace(":state", "?")})
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    {NEXT.replace(":state", "?")})
             """,
             (
                 url,
@@ -614,6 +638,7 @@ class Store:
                 article.content,
                 article.text,
                 article.words,
+                article.pages,
                 article.paywalled,
                 str(state),
                 _stamp(added),
@@ -625,7 +650,24 @@ class Store:
         )
         self.db.commit()
         assert cursor.lastrowid is not None
-        return self._require(cursor.lastrowid)
+        item = self._require(cursor.lastrowid)
+        if article.pdf and self.files:
+            item = self._set(item.id, file=self._keep(item, article.pdf))
+        return item
+
+    def _keep(self, item: Item, pdf: bytes) -> str:
+        """Save an item's PDF beside the database, and return the name it was given.
+
+        Named for the item once and for good, so a later change of title doesn't orphan it.
+        Written to one side and then moved into place, so there's never half a file.
+        """
+        assert self.files is not None
+        self.files.mkdir(parents=True, exist_ok=True)
+        name = item.file or f"{urls.slug(item.name)}-{item.id}.pdf"
+        unfinished = self.files / f"{name}.part"
+        unfinished.write_bytes(pdf)
+        unfinished.replace(self.files / name)
+        return name
 
     def _set(self, id: int, **columns: object) -> Item:
         assignments = ", ".join(f"{column} = :{column}" for column in columns)
@@ -649,8 +691,13 @@ class Store:
                 "content": article.content,
                 "text": article.text,
                 "words": article.words,
+                "pages": article.pages,
                 "paywalled": article.paywalled,
             }
+            if article.pdf and self.files:
+                # Named after the title it's about to have, if this fetch is what supplies one.
+                titled = item if item.title else replace(item, title=article.title)
+                columns["file"] = self._keep(titled, article.pdf)
             if article.text != self.text(id):
                 columns["tldr"] = ""  # what's on record summarizes a text that's gone
         # Follow the link to wherever it really leads, unless that's already a different item.
@@ -741,6 +788,8 @@ class Store:
         self.db.execute("DELETE FROM items WHERE id = ?", (id,))
         self._close_up(item.state, item.number)
         self.db.commit()
+        if item.file and self.files:
+            (self.files / item.file).unlink(missing_ok=True)
 
     def _move(self, item: Item, state: State, **columns: object) -> Item:
         assignments = "".join(f", {column} = :{column}" for column in columns)

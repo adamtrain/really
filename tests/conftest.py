@@ -20,6 +20,10 @@ FORUM = "https://www.longtable.example/posts/k3Qw9xTz/on-keeping-a-commonplace-b
 # The same post, as linked from a reading sequence.
 FORUM_IN_SEQUENCE = "https://www.longtable.example/s/n945eovrA3/p/k3Qw9xTz"
 
+# A link to a PDF: a paper with no title in its metadata, twelve pages long.
+PAPER = "https://papers.example/pdf/2609.01234"
+PAPER_PDF_TEXT = "We find that reading lists grow without bound. "
+
 # A page whose query string is its address, and a link whose query string is only decoration.
 VIDEO = "https://videos.example/watch?v=abc123"
 DECORATED = f"{BLOG}?ref=newsletter&share=1"
@@ -75,18 +79,35 @@ def essay(title: str, paragraphs: int = 40, head: str = "") -> bytes:
     return html(title, body, head=head)
 
 
-def pdf(text: str, title: str = "", author: str = "") -> bytes:
-    """A minimal one-page PDF, written by hand."""
-    stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode()
+def pdf(
+    text: str, title: str = "", author: str = "", heading: str = "", stamp: str = "", pages: int = 1
+) -> bytes:
+    """A minimal PDF, written by hand.
+
+    `heading` is set in large type above the text, as a paper's title is. `stamp` is set
+    larger still but sideways in the margin, as arXiv marks its papers. Each of `pages`
+    pages carries the same content.
+    """
+    drawn = [f"BT /F1 12 Tf 72 700 Td ({text}) Tj ET"]
+    if heading:
+        drawn.insert(0, f"BT /F1 24 Tf 72 740 Td ({heading}) Tj ET")
+    if stamp:
+        drawn.insert(0, f"BT /F1 30 Tf 0 1 -1 0 40 300 Tm ({stamp}) Tj ET")
+    stream = "\n".join(drawn).encode()
     info = f"<< /Title ({title}) /Author ({author}) >>".encode()
+    leaf = (
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>"
+    )
+    kids = " ".join(f"{7 + n} 0 R" for n in range(pages - 1))
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        f"<< /Type /Pages /Kids [3 0 R {kids}] /Count {pages} >>".encode(),
+        leaf,
         b"<< /Length %d >>\nstream\n%s\nendstream" % (len(stream), stream),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         info,
+        *[leaf] * (pages - 1),
     ]
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
@@ -148,6 +169,8 @@ def web() -> Web:
     web.serve(VIDEO, essay("A Talk Worth Watching"))
     web.serve("https://videos.example/watch", html("Videos", "<p>Pick something to watch.</p>"))
     web.serve(DECORATED, load("blog_post.html"))
+    paper = pdf(PAPER_PDF_TEXT * 12, heading="Reading Lists Grow Without Bound", pages=12)
+    web.serve(PAPER, paper, content_type="application/pdf")
     web.serve(LONGREAD, essay("The Long One"))
     for n in range(1, 8):
         web.serve(f"{LONGREAD}?part={n}", essay(f"The Long One, Part {n}"))

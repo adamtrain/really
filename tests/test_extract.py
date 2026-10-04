@@ -315,6 +315,43 @@ def test_pdf():
     assert article.author == "R. Reader"
     assert "index words" in article.text
     assert article.published == ""
+    assert article.words == 6
+    assert article.pages == 1
+    assert article.pdf == body  # the file itself, to be kept
+    assert "%PDF" not in repr(article)  # and kept out of the way when one is printed
+
+
+def test_a_pdf_with_no_title_in_its_metadata_takes_its_largest_heading():
+    body = pdf("We propose a new method. " * 40, heading="Attention Is Nearly All You Need")
+    article = extract(Page("https://example.com/1706.03762", "application/pdf", body))
+    assert article.title == "Attention Is Nearly All You Need"
+
+
+def test_text_printed_sideways_is_not_a_title():
+    """arXiv stamps each paper's margin in type larger than its title."""
+    body = pdf(
+        "We propose.", heading="The Real Title", stamp="arXiv:1706.03762v7 [cs.CL] 2 Aug 2023"
+    )
+    article = extract(Page("https://arxiv.example/pdf/1706.03762", "application/pdf", body))
+    assert article.title == "The Real Title"
+
+
+def test_a_pdf_set_all_in_one_size_has_no_heading_to_take():
+    body = pdf("Plain notes from start to finish, with nothing set apart as a title.")
+    assert extract(Page("https://example.com/notes.pdf", "application/pdf", body)).title == ""
+
+
+def test_the_title_in_a_pdf_s_metadata_wins_over_its_heading():
+    body = pdf("Text.", title="The Stated Title", heading="A Running Head")
+    article = extract(Page("https://example.com/paper.pdf", "application/pdf", body))
+    assert article.title == "The Stated Title"
+
+
+def test_a_pdf_s_pages_are_counted():
+    body = pdf("One page of several.", pages=12)
+    article = extract(Page("https://example.com/long.pdf", "application/pdf", body))
+    assert article.pages == 12
+    assert article.words == 4 * 12
 
 
 def test_pdf_served_with_the_wrong_content_type():
@@ -328,9 +365,8 @@ def test_pdf_title_that_is_really_a_filename():
 
 
 def test_unreadable_things_are_empty_not_errors():
-    assert (
-        extract(Page("https://example.com/a.pdf", "application/pdf", b"%PDF-1.4 nope")).words == 0
-    )
+    broken = extract(Page("https://example.com/a.pdf", "application/pdf", b"%PDF-1.4 nope"))
+    assert (broken.words, broken.pages, broken.pdf) == (0, 0, b"")  # nothing worth keeping
     assert extract(Page("https://example.com/a.png", "image/png", b"\x89PNG")).words == 0
     assert extract(Page("https://example.com/", "text/html", b"")).words == 0
 

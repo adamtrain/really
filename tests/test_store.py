@@ -1,4 +1,5 @@
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -774,9 +775,130 @@ def test_a_list_from_before_expiry_is_upgraded(tmp_path):
         assert (store.tldr(item.id), store.search("heirloom")[0].item.ref) == ("Old.", "1")
         store.set_expiry("example.com", DAY)
         assert [due.title for due in store.expired()] == ["From Before"]
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     with Store(path) as store:
         assert store.expiries() == {"example.com": DAY}
+
+
+# ── PDFs ──────────────────────────────────────────────────────────────────────
+
+PAPER = Article(
+    title="On Indexing",
+    author="R. Reader",
+    text="Search engines index words, not pages. " * 100,
+    content="Search engines index words, not pages. " * 100,
+    pages=12,
+    pdf=b"%PDF-1.4 the paper itself",
+)
+
+
+def test_a_pdf_is_saved_beside_the_database(store):
+    item = store.add("https://example.com/papers/indexing.pdf", PAPER, fetched=True)
+    assert (item.file, item.pages, item.words) == (f"on-indexing-{item.id}.pdf", 12, 600)
+    saved = store.file(item)
+    assert saved == store.path.parent / "pdfs" / item.file
+    assert saved.read_bytes() == PAPER.pdf
+    assert [path.name for path in saved.parent.iterdir()] == [item.file]  # and nothing half-written
+
+
+def test_what_is_not_a_pdf_has_no_file(store, lesson):
+    assert (lesson.file, lesson.pages, store.file(lesson)) == ("", 0, None)
+    assert not (store.path.parent / "pdfs").exists()  # the folder appears with the first PDF
+
+
+def test_a_pdf_with_no_title_is_named_for_its_link(store):
+    untitled = replace(PAPER, title="")
+    item = store.add("https://arxiv.example/pdf/1706.03762", untitled, fetched=True)
+    assert item.file == f"arxiv-example-pdf-1706-03762-{item.id}.pdf"
+
+
+def test_deleting_a_pdf_s_item_deletes_the_file(store):
+    kept = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    gone = store.add("https://example.com/b.pdf", PAPER, fetched=True)
+    store.delete(gone.id)
+    assert store.file(gone) is None
+    assert store.file(kept).is_file()
+    store.delete(kept.id)
+    assert list((store.path.parent / "pdfs").iterdir()) == []
+
+
+def test_a_pdf_follows_its_item_into_the_archive_and_back(store):
+    item = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    archived = store.archive(item.id)
+    assert store.file(archived) == store.file(item)
+    assert store.file(store.requeue(item.id)).read_bytes() == PAPER.pdf
+
+
+def test_a_pdf_fetched_later_is_saved_then(store):
+    item = store.add("https://example.com/papers/indexing.pdf")  # added offline
+    assert store.file(item) is None
+    fetched = store.set_article(item.id, PAPER)
+    assert fetched.file == f"on-indexing-{item.id}.pdf"  # named for the title it now has
+    assert (fetched.pages, store.file(fetched).read_bytes()) == (12, PAPER.pdf)
+
+
+def test_a_pdf_fetched_again_replaces_the_file_under_the_same_name(store):
+    item = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    store.edit(item.id, title="A Better Title")
+    revised = replace(PAPER, pdf=b"%PDF-1.4 the paper, revised", pages=14)
+    again = store.set_article(item.id, revised)
+    assert (again.file, again.pages) == (item.file, 14)
+    assert store.file(again).read_bytes() == b"%PDF-1.4 the paper, revised"
+    assert len(list(store.file(again).parent.iterdir())) == 1
+
+
+def test_a_lesser_fetch_does_not_replace_the_file(store):
+    item = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    stub = Article(text="Access denied.", pdf=b"%PDF-1.4 a one-line error", pages=1)
+    after = store.set_article(item.id, stub)
+    assert (after.pages, store.file(after).read_bytes()) == (12, PAPER.pdf)
+
+
+def test_a_file_that_has_gone_missing_is_not_claimed(store):
+    item = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    store.file(item).unlink()
+    assert store.file(item) is None
+    store.delete(item.id)  # and deleting the item doesn't trip over it
+
+
+def test_an_expired_pdf_takes_its_file_with_it(store, clock):
+    store.set_expiry("example.com", DAY)
+    item = store.add("https://example.com/a.pdf", PAPER, fetched=True)
+    clock.advance(days=2)
+    for due in store.expired():
+        store.delete(due.id)
+    assert store.file(item) is None
+
+
+def test_a_list_from_before_pdfs_were_kept_is_upgraded(tmp_path):
+    path = tmp_path / "really.db"
+    old = sqlite3.connect(path)
+    for script in MIGRATIONS[:5]:
+        old.executescript(script)
+    old.execute("PRAGMA user_version = 5")
+    old.execute(
+        "INSERT INTO items (url, title, text, words, number, added_at, queued_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            "https://example.com/old.pdf",
+            "From Before",
+            "an heirloom",
+            2,
+            1,
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+    old.execute("INSERT INTO expiries VALUES ('example.org', 86400)")
+    old.commit()
+    old.close()
+    with Store(path) as store:
+        [item] = store.items()
+        assert (item.title, item.file, item.pages, store.file(item)) == ("From Before", "", 0, None)
+        assert store.expiries() == {"example.org": 86400}
+        saved = store.file(store.set_article(item.id, PAPER))  # fetching it again saves the file
+        assert saved is not None and saved.read_bytes() == PAPER.pdf
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 6
 
 
 # ── The file ──────────────────────────────────────────────────────────────────

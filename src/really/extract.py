@@ -11,7 +11,7 @@ import logging
 import re
 import warnings
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 from . import urls
@@ -19,6 +19,7 @@ from .fetch import Page
 
 SUMMARY_LENGTH = 280
 OPENING = 200  # how much of two articles' text has to match for them to be the same one
+LONGEST_TITLE = 200  # more than this in a PDF's largest type is a paragraph, not a title
 
 # With these, a publication date only comes from the page's own metadata, never from a guess
 # based on whatever dates happen to appear in the text.
@@ -72,6 +73,8 @@ class Article:
     canonical: str = ""  # the page's preferred address for itself, when that can be trusted
     paywalled: bool = False  # the page says the full text is for subscribers
     footnote_words: int = 0  # how much of the text is footnotes
+    pages: int = 0  # for a PDF, how many
+    pdf: bytes = field(default=b"", repr=False)  # for a PDF, the file itself
 
     @property
     def words(self) -> int:
@@ -329,13 +332,40 @@ def _from_pdf(page: Page) -> Article:
         info = reader.metadata
         title = _squash(info.title if info else None)
         author = _squash(info.author if info else None)
+        if not title or _FILE_LIKE.search(title):
+            title = _headline(reader.pages[0]) if pages else ""
     except Exception:  # pypdf raises all sorts on malformed files
         return Article()
     text = "\n\n".join(leaf for leaf in pages if leaf)
     return Article(
-        title="" if _FILE_LIKE.search(title) else title,
+        title=title,
         author=author,
         summary=_excerpt(text),
         content=text,
         text=text,
+        pages=len(pages),
+        pdf=page.body,
     )
+
+
+def _headline(first_page) -> str:
+    """A PDF's title as its first page shows it: whatever is set in the largest type.
+
+    Most PDFs don't state a title in their metadata, papers least of all. Text that runs up
+    the page is left out, because arXiv stamps its margins in type larger than any title.
+    A page set all in one size has no headline, and nor is a whole paragraph one.
+    """
+    runs: list[tuple[float, str]] = []
+
+    def note(text: str, cm: list[float], tm: list[float], font: object, size: float) -> None:
+        upright = abs(tm[0]) >= abs(tm[1]) and abs(cm[0]) >= abs(cm[1])
+        if text.strip() and upright:
+            runs.append((round(size * abs(tm[3] or 1) * abs(cm[3] or 1), 1), text))
+
+    first_page.extract_text(visitor_text=note)
+    sizes = {size for size, _ in runs}
+    if len(sizes) < 2:
+        return ""
+    headline = _squash("".join(text for size, text in runs if size == max(sizes)))
+    titled = len(headline) <= LONGEST_TITLE and re.search(r"[^\W\d_]{3}", headline)
+    return headline if titled else ""

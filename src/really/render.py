@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from rich import box
 from rich.console import Console, Group
@@ -106,9 +107,12 @@ def took(seconds: int) -> str:
 
 
 def reading_time(item: Item) -> str:
-    """How long an item takes to read. A + means at least: we only have the free preview."""
+    """How long an item takes to read. A + means at least: we only have the free preview.
+
+    A PDF with no text to count, a scan, is given by its pages instead.
+    """
     if not item.words:
-        return ""
+        return f"{item.pages} pp" if item.pages else ""
     return f"{item.minutes}{'+' if item.paywalled else ''} min"
 
 
@@ -308,7 +312,8 @@ def address(console: Console, item: Item) -> None:
 
 
 def added(console: Console, item: Item, queue_size: int) -> None:
-    receipt(console, "Added", item, f"{queue_size:,} in your queue")
+    saved = ["PDF saved"] if item.file else []
+    receipt(console, "Added", item, *saved, f"{queue_size:,} in your queue")
 
 
 def duplicate(console: Console, item: Item) -> None:
@@ -419,7 +424,9 @@ def _dated(moment: datetime, now: datetime | None) -> Text:
     return text.append(f" · {_when(moment, now)}", style=FAINT)
 
 
-def details(console: Console, item: Item, *, now: datetime | None = None) -> None:
+def details(
+    console: Console, item: Item, *, file: Path | None = None, now: datetime | None = None
+) -> None:
     """An item's card, and under it what the card leaves out: its saved copy and its history."""
     width = min(_width(console), READING_WIDTH)
     grid = Table.grid(padding=(0, 3))
@@ -431,9 +438,19 @@ def details(console: Console, item: Item, *, now: datetime | None = None) -> Non
             copy.append(", the free preview only", style=STALE)
         if item.fetched_at:
             copy.append(f" · fetched {_when(item.fetched_at, now)}", style=FAINT)
+    elif item.file:
+        copy = Text("no text could be read from the PDF", style=STALE)
     else:
         copy = Text.from_markup(f"none · [bold]really refresh {item.ref}[/] fetches one")
     grid.add_row("Saved copy", copy)
+    if file:
+        megabytes = file.stat().st_size / 1_000_000
+        where = Text(str(file).replace(str(Path.home()), "~", 1), overflow="fold")
+        where.append(f" · {plural(item.pages, 'page')} · {megabytes:.1f} MB", style=FAINT)
+        grid.add_row("File", where)
+    elif item.file:
+        gone = f"{item.file} is missing · [bold]really refresh {item.ref}[/] fetches it again"
+        grid.add_row("File", Text.from_markup(gone, style=STALE))
     grid.add_row("Added", _dated(item.added_at, now))
     if item.opened_at:
         grid.add_row("Opened", _dated(item.opened_at, now))

@@ -20,10 +20,12 @@ from .conftest import (
     FORUM,
     FORUM_IN_SEQUENCE,
     LONGREAD,
+    PAPER,
     PAYWALLED,
     POST,
     VIDEO,
     essay,
+    pdf,
 )
 
 runner = CliRunner()
@@ -593,6 +595,93 @@ def test_requeue(home):
     assert run("requeue", "1").exit_code == 1
 
 
+# ── PDFs ──────────────────────────────────────────────────────────────────────
+
+
+def saved_pdfs(home) -> list[str]:
+    folder = home.parent / "pdfs"
+    return sorted(path.name for path in folder.iterdir()) if folder.exists() else []
+
+
+def test_a_link_to_a_pdf_saves_the_pdf_beside_the_list(home):
+    output = ok("add", PAPER)
+    assert "Added #1 Reading Lists Grow Without Bound" in output  # from its largest heading
+    assert "PDF saved" in output
+    [item] = items(home)
+    assert (item.pages, item.words) == (12, 12 * (12 * 8 + 5))  # the text and heading, each page
+    assert saved_pdfs(home) == [f"reading-lists-grow-without-bound-{item.id}.pdf"]
+    assert (home.parent / "pdfs" / item.file).read_bytes().startswith(b"%PDF-1.4")
+    assert "#1 Reading Lists" in ok("search", "grow", "bound")  # its text is searchable
+
+
+def test_opening_a_pdf_opens_the_saved_file(home, browser):
+    ok("add", PAPER, BLOG)
+    ok("next")
+    ok("open", "2")
+    assert browser == [str(home.parent / "pdfs" / items(home)[0].file), BLOG]
+
+
+def test_a_pdf_whose_file_has_gone_opens_its_link(home, browser):
+    ok("add", PAPER)
+    (home.parent / "pdfs" / items(home)[0].file).unlink()
+    ok("open", "1")
+    assert browser == [PAPER]
+    assert "is missing" in ok("info", "1")
+
+
+def test_info_says_where_a_pdf_is_saved(home):
+    ok("add", PAPER)
+    details = " ".join(ok("info", "1").split())
+    assert f"pdfs/{items(home)[0].file}" in details.replace(" ", "")  # a long path may fold
+    assert "· 12 pages · 0.0 MB" in details
+
+
+def test_a_pdf_stays_with_its_item_and_goes_when_it_does(home, browser):
+    ok("add", PAPER)
+    ok("next")
+    ok("done")
+    assert len(saved_pdfs(home)) == 1  # archived, and still there
+    ok("delete", "--yes", "a")
+    assert saved_pdfs(home) == []
+
+
+def test_an_expired_pdf_is_deleted_with_its_file(home, clock):
+    ok("expire", "papers.example", "3d")
+    ok("add", PAPER)
+    clock.advance(days=3)
+    assert "Expired #1 Reading Lists Grow Without Bound" in ok()
+    assert saved_pdfs(home) == []
+
+
+def test_a_pdf_added_offline_is_saved_when_it_is_fetched(home):
+    ok("add", "--offline", PAPER)
+    assert saved_pdfs(home) == []
+    assert "Fetched #1 Reading Lists Grow Without Bound" in ok("refresh")
+    assert len(saved_pdfs(home)) == 1
+
+
+def test_a_scan_is_measured_in_pages(home, web):
+    scan = "https://papers.example/scans/1887-minutes.pdf"
+    web.serve(scan, pdf("", pages=40), content_type="application/pdf")
+    ok("add", scan)
+    assert "40 pp" in ok()
+    assert "no text could be read from the PDF" in ok("info", "1")
+    result = run("tldr", "1")
+    assert result.exit_code == 1
+    assert "#1 is a PDF with no text in it to summarize." in result.output
+    assert "really refresh" not in result.output  # fetching it again wouldn't help
+
+
+def test_exporting_takes_the_pdf_along(home, tmp_path):
+    ok("add", PAPER)
+    ok("archive", "1")
+    target = tmp_path / "out"
+    ok("export", str(target))
+    assert sorted(path.suffix for path in target.iterdir()) == [".md", ".pdf"]
+    [entry] = json.loads(ok("export", "--json"))
+    assert (entry["pages"], entry["file"]) == (12, items(home)[0].file)
+
+
 # ── Things that go stale ──────────────────────────────────────────────────────
 
 FIELDNOTES = "fieldnotes.example"  # where the blog post is from
@@ -769,6 +858,13 @@ def test_tldr_summarizes_the_saved_text(claude):
     )
     assert asked["text"].startswith("Every few months somebody announces")
     assert "https://example.org" not in asked["text"]  # the plain text, not the Markdown
+
+
+def test_tldr_summarizes_a_pdf_from_the_text_in_it(claude):
+    ok("add", PAPER)
+    assert "Reading Lists Grow Without Bound" in ok("tldr", "1")
+    [asked] = claude
+    assert asked["text"].count("We find that reading lists grow without bound.") == 12 * 12
 
 
 def test_tldr_is_only_asked_for_once(home, claude):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Callable
 from urllib.parse import unquote, urlsplit, urlunsplit
 
@@ -164,6 +165,13 @@ def is_sign_in(url: str) -> bool:
     except ValueError:
         return False
     return bool(_SIGN_IN.search(f"{parts.hostname or ''}{parts.path}"))
+
+
+def slug(text: str, length: int = 60) -> str:
+    """Some text as part of a file name: lowercase ASCII words joined by hyphens."""
+    plain = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
+    words = re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")
+    return words[:length].rstrip("-") or "untitled"
 
 
 def title_from_url(url: str) -> str:
