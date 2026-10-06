@@ -256,7 +256,7 @@ def capture(
 ) -> Capture:
     """Put one link on the list, fetching it first to learn what it is and where it leads."""
     address = urls.clean(link)
-    if existing := store.by_url(address):
+    if existing := store.known(address):
         return Capture(existing, new=False)
     if offline:
         return Capture(store.add(address, tags=tags), new=True)
@@ -265,7 +265,7 @@ def capture(
         landed, article = understand(link, fetch(urls.page_of(link), client), client)
     except FetchError as e:
         return Capture(store.add(address, tags=tags), new=True, problem=str(e))
-    if existing := store.by_url(landed):
+    if existing := store.known(landed):
         return Capture(existing, new=False)
     return Capture(store.add(landed, article, fetched=True, tags=tags), new=True)
 
@@ -1059,7 +1059,7 @@ def import_safari(
             address = urls.clean(entry.url)
             if entry.read and read is ReadPolicy.SKIP:
                 tally["skipped"] += 1
-            elif store.by_url(address):
+            elif store.known(address):
                 tally["already here"] += 1
             else:
                 archived = entry.read and read is ReadPolicy.ARCHIVE

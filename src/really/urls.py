@@ -149,6 +149,31 @@ def clean(url: str) -> str:
     return urlunsplit((scheme, netloc, parts.path or "/", parts.query, parts.fragment))
 
 
+def variants(url: str) -> list[str]:
+    """The other addresses a page almost always answers to: http or https, with or without
+    `www.`, with or without a slash on the end. For telling that you have something already
+    when the page doesn't say which of them it prefers.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return []
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return []
+    name = parts.netloc
+    hosts = {name, name.removeprefix("www.") if name.startswith("www.") else f"www.{name}"}
+    paths = {parts.path}
+    if parts.path != "/":
+        paths.add(parts.path.removesuffix("/") if parts.path.endswith("/") else f"{parts.path}/")
+    found = {
+        urlunsplit(parts._replace(scheme=scheme, netloc=netloc, path=path))
+        for scheme in ("http", "https")
+        for netloc in hosts
+        for path in paths
+    }
+    return sorted(found - {url})
+
+
 def host(url: str) -> str:
     """The site a URL belongs to, without the `www.`."""
     try:

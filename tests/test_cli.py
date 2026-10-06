@@ -231,6 +231,38 @@ def test_a_duplicate_is_spotted_before_fetching(home, web):
     assert len(web.requests) == before
 
 
+def test_a_duplicate_is_spotted_whatever_the_scheme_host_or_slash(home, web):
+    ok("add", BLOG)
+    for other in (f"{BLOG}/", BLOG.replace("https://", "http://www.")):
+        assert "Already have #1" in ok("add", other)
+    assert web.requests == [BLOG]
+    assert len(items(home)) == 1
+
+
+def test_a_duplicate_reminds_you_of_your_history_with_it(home, clock):
+    ok("add", BLOG)
+    clock.advance(days=3)
+    output = ok("add", BLOG)
+    assert "Added 3d ago, not opened yet. really open 1 opens it." in output
+    ok("open", "1")
+    clock.advance(hours=2)
+    assert "Added 3d ago, opened 2h ago. really open 1 opens it again." in ok("add", BLOG)
+    ok("done", "-n", "Good on batching")
+    clock.advance(days=21)
+    output = ok("add", BLOG)
+    assert "Already have #a Tidy Queues, Tidy Mind" in output
+    assert "Added 3w ago, archived 3w ago. Your note: Good on batching" in output
+    assert "really show a reads your copy, really requeue a puts it back in your queue." in output
+    assert len(items(home)) == 1
+
+
+def test_a_duplicate_says_how_long_it_has_left(home, clock):
+    ok("expire", "fieldnotes.example", "7d")
+    ok("add", BLOG)
+    clock.advance(days=2)
+    assert "Added 2d ago, not opened yet, 5d left before it expires." in ok("add", BLOG)
+
+
 def test_add_several_from_stdin_with_tags(home):
     output = ok("add", "-t", "Later", "-", input=f"{BLOG}\nand {PAYWALLED}\n")
     assert "2 links" in output

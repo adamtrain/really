@@ -426,6 +426,18 @@ class Store:
         row = self.db.execute(f"SELECT {COLUMNS} FROM items WHERE url = ?", (url,)).fetchone()
         return self._load(row) if row else None
 
+    def known(self, url: str) -> Item | None:
+        """The item for a page you have already, by this address or one as good as it."""
+        if item := self.by_url(url):
+            return item
+        others = urls.variants(url)
+        row = self.db.execute(
+            f"SELECT {COLUMNS} FROM items WHERE url IN ({', '.join('?' * len(others))}) "
+            "ORDER BY id LIMIT 1",
+            others,
+        ).fetchone()
+        return self._load(row) if row else None
+
     def items(self, state: State | None = None, tag: str | None = None) -> list[Item]:
         """Items in order: the queue from 1, then the archive from a."""
         where, values = self._filters(state, tag)
@@ -492,7 +504,7 @@ class Store:
             if len(name) <= 2:  # too short to be a title someone's searching for
                 raise NotFound(f"There's no #{name} in your archive.")
         for url in urls.find_urls(ref):
-            if item := self.by_url(urls.clean(url)):
+            if item := self.known(urls.clean(url)):
                 return item
         # Matched here rather than with LIKE, which only ignores case for ASCII.
         needle = ref.casefold()

@@ -316,13 +316,35 @@ def added(console: Console, item: Item, queue_size: int) -> None:
     receipt(console, "Added", item, *saved, f"{queue_size:,} in your queue")
 
 
-def duplicate(console: Console, item: Item) -> None:
+def duplicate(console: Console, item: Item, *, now: datetime | None = None) -> None:
+    """Say that a link is one you have, what's become of it since, and how to get back to it."""
+    told = [f"Added {_when(item.added_at, now)}"]
     if item.archived:
-        where = f"archived {_when(item.archived_at or item.added_at)}"
         style, mark = ARCHIVE, "◆"
+        told.append(f"archived {_when(item.archived_at or item.added_at, now)}")
+        again = (
+            f"[bold]really show {item.ref}[/] reads your copy"
+            if item.words
+            else f"[bold]really open {item.ref}[/] opens it"
+        )
+        again += f", [bold]really requeue {item.ref}[/] puts it back in your queue."
     else:
-        where, style, mark = f"added {_when(item.added_at)}", ACCENT, "◇"
-    receipt(console, "Already have", item, where, style=style, mark=mark)
+        style, mark = ACCENT, "◇"
+        if item.opened_at:
+            told.append(f"opened {_when(item.opened_at, now)}")
+            again = f"[bold]really open {item.ref}[/] opens it again."
+        else:
+            told.append("not opened yet")
+            again = f"[bold]really open {item.ref}[/] opens it."
+        if item.expires_at:
+            told.append(f"{left(item.expires_at, now)} before it expires")
+    receipt(console, "Already have", item, style=style, mark=mark)
+    history = Text(f"  {', '.join(told)}. ", style=FAINT)
+    if item.archived and item.note:
+        # On a line of its own, and as plain text: it's yours, and may be long.
+        console.print(history.append(f"Your note: {item.note}"), no_wrap=True, overflow="ellipsis")
+        history = Text("  ", style=FAINT)
+    console.print(history.append_text(Text.from_markup(again)))
 
 
 def timed(console: Console, reading: Reading, pace: Pace) -> None:

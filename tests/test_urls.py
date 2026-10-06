@@ -107,6 +107,25 @@ def test_articles_about_signing_in_are_not_sign_in_pages(url):
     assert not urls.is_sign_in(url)
 
 
+def test_variants_are_the_other_addresses_a_page_answers_to():
+    assert urls.variants("https://example.com/a?id=1") == [
+        "http://example.com/a/?id=1",
+        "http://example.com/a?id=1",
+        "http://www.example.com/a/?id=1",
+        "http://www.example.com/a?id=1",
+        "https://example.com/a/?id=1",
+        "https://www.example.com/a/?id=1",
+        "https://www.example.com/a?id=1",
+    ]
+    assert "https://example.com/a" in urls.variants("http://www.example.com/a/")
+    assert urls.variants("https://example.com/") == [
+        "http://example.com/",
+        "http://www.example.com/",
+        "https://www.example.com/",
+    ]
+    assert urls.variants("not a link") == []
+
+
 def test_host_drops_www():
     assert urls.host("https://www.Example.com/a") == "example.com"
     assert urls.host("not a url") == ""

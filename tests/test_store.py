@@ -71,6 +71,14 @@ def test_add_and_get(store, lesson):
     assert store.get(999) is None
 
 
+def test_a_page_is_known_by_any_address_as_good_as_its_own(store, lesson):
+    assert store.known("https://example.com/bitter") == lesson
+    assert store.known("http://www.example.com/bitter/") == lesson
+    assert store.known("https://example.com/bitter?page=2") is None
+    assert store.known("https://example.com/bitterer") is None
+    assert store.by_url("https://example.com/bitter/") is None  # by_url is exact
+
+
 def test_a_bare_link_gets_a_stand_in_name(store):
     item = store.add("https://example.com/posts/on-reading-slowly")
     assert item.title == ""
